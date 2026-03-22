@@ -1,0 +1,23 @@
+[package]
+name = "hn-clickhouse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# ClickHouse client
+clickhouse.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization (Row derive)
+serde.workspace = true
+
+# Date/time (using time crate to match clickhouse-rs)
+time = { version = "0.3", features = ["serde"] }
+
+# Error handling
+thiserror.workspace = true
+
+# Tokenizer for version constant
+tokenizer = { path = "../tokenizer" }

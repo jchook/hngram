@@ -8,7 +8,7 @@ Below is a **proper RFC-style spec** you can implement directly in Rust.
 
 ## Status
 
-Draft → Target: Accepted
+**Implemented** in `server/crates/tokenizer/src/lib.rs`
 
 ---
 
@@ -361,16 +361,19 @@ Always discard:
 
 ## 9. 🔒 Versioning
 
-Define:
+Defined in `server/crates/tokenizer/src/lib.rs`:
 
-```id="version"
-tokenizer_version = "v1"
+```rust
+pub const TOKENIZER_VERSION: u8 = 1;
 ```
+
+Stored in ClickHouse as `LowCardinality(String)` (e.g., `"1"`) to allow future semantic versioning.
 
 Future changes:
 
 * must increment version
 * must not silently alter historical data
+* requires full re-index or parallel corpus version
 
 ---
 
@@ -425,9 +428,11 @@ That is **exactly what you want** for an n-gram viewer.
 
 ---
 
-If you’re ready, next RFC should be:
+## Implementation Notes
 
-👉 **RFC-002: N-gram generation + pruning strategy**
-
-That’s where performance and storage really get decided.
+- All 23 ground truth tests pass
+- Technical hyphen regex: `^(?:[a-z]+[0-9]+-[a-z0-9]+|[a-z0-9]+-[0-9]+|[a-z]{1,4}[0-9]+-[0-9]+)$`
+- URL extraction replaces full URL with domain only, wrapped in spaces
+- Uses `html-escape` crate for HTML entity decoding
+- Uses `unicode-normalization` crate for NFKC
 

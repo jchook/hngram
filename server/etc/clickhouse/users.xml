@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- User-level settings per RFC-003 Section 12 -->
+    <profiles>
+        <default>
+            <!-- Per-query memory limit -->
+            <max_memory_usage>500000000</max_memory_usage>
+
+            <!-- Spill to disk for large GROUP BY / ORDER BY -->
+            <max_bytes_before_external_group_by>200000000</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>200000000</max_bytes_before_external_sort>
+        </default>
+    </profiles>
+
+    <users>
+        <default>
+            <profile>default</profile>
+            <quota>default</quota>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>

@@ -26,7 +26,7 @@ utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 # ClickHouse
-clickhouse = { version = "0.11", features = ["lz4"] }
+clickhouse = { version = "0.11", features = ["lz4", "time"] }
 
 # Logging
 tracing = "0.1"
@@ -41,3 +41,4 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
 tokenizer = { path = "crates/tokenizer" }
+hn-clickhouse = { path = "crates/clickhouse" }

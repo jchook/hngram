@@ -6,13 +6,13 @@ CREATE DATABASE IF NOT EXISTS hn_ngram;
 -- Stores pre-aggregated daily counts for each n-gram
 CREATE TABLE IF NOT EXISTS hn_ngram.ngram_counts
 (
-    tokenizer_version UInt8,
+    tokenizer_version LowCardinality(String),
     n UInt8,
     ngram String,
     bucket Date,
     count UInt32
 )
-ENGINE = MergeTree()
+ENGINE = MergeTree
 PARTITION BY toYYYYMM(bucket)
 ORDER BY (tokenizer_version, n, ngram, bucket)
 SETTINGS index_granularity = 8192;
@@ -21,26 +21,25 @@ SETTINGS index_granularity = 8192;
 -- Stores total n-gram counts per bucket for normalization denominators
 CREATE TABLE IF NOT EXISTS hn_ngram.bucket_totals
 (
-    tokenizer_version UInt8,
+    tokenizer_version LowCardinality(String),
     n UInt8,
     bucket Date,
     total_count UInt64
 )
-ENGINE = MergeTree()
+ENGINE = MergeTree
 PARTITION BY toYYYYMM(bucket)
-ORDER BY (tokenizer_version, n, bucket)
-SETTINGS index_granularity = 8192;
+ORDER BY (tokenizer_version, n, bucket);
 
--- Optional: N-gram vocabulary table for admission tracking
+-- N-gram vocabulary table for admission tracking
+-- Uses ReplacingMergeTree to handle re-ingestion without duplicates
+-- (ClickHouse has no INSERT ... ON CONFLICT, so we rely on eventual dedup)
 CREATE TABLE IF NOT EXISTS hn_ngram.ngram_vocabulary
 (
-    tokenizer_version UInt8,
+    tokenizer_version LowCardinality(String),
     n UInt8,
     ngram String,
     global_count UInt64,
-    first_seen Date,
-    last_seen Date
+    admitted_at DateTime
 )
-ENGINE = ReplacingMergeTree()
-ORDER BY (tokenizer_version, n, ngram)
-SETTINGS index_granularity = 8192;
+ENGINE = ReplacingMergeTree(admitted_at)
+ORDER BY (tokenizer_version, n, ngram);

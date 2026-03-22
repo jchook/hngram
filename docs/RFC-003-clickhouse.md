@@ -2,6 +2,13 @@
 
 ## ClickHouse Schema, Partitioning, and Query Model
 
+## Status
+
+**Implemented**
+- Schema: `server/etc/clickhouse/init/001-schema.sql`
+- Config: `server/etc/clickhouse/config.xml`, `users.xml`
+- Rust client: `server/crates/clickhouse/src/lib.rs` (`hn-clickhouse` crate)
+
 ---
 
 ## 0. Scope
@@ -213,7 +220,7 @@ CREATE TABLE ngram_vocabulary (
     global_count UInt64,
     admitted_at DateTime
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree(admitted_at)
 ORDER BY (tokenizer_version, n, ngram);
 ```
 
@@ -223,6 +230,7 @@ ORDER BY (tokenizer_version, n, ngram);
 
 * supports pruning logic (RFC-002)
 * separates ingestion concerns from serving layer
+* `ReplacingMergeTree` handles deduplication on re-ingestion (ClickHouse lacks `INSERT ... ON CONFLICT`)
 
 ---
 
@@ -586,4 +594,43 @@ If proposing changes:
 * must preserve query pattern efficiency
 * must not introduce full scans over all ngrams
 * must maintain correctness of normalization
+
+---
+
+# 16. Implementation Notes
+
+## Rust `hn-clickhouse` crate
+
+Located at `server/crates/clickhouse/`, provides:
+
+### Row types (match schema exactly)
+```rust
+pub struct NgramCountRow { tokenizer_version, n, ngram, bucket, count }
+pub struct BucketTotalRow { tokenizer_version, n, bucket, total_count }
+pub struct NgramVocabularyRow { tokenizer_version, n, ngram, global_count, admitted_at }
+```
+
+### Client wrapper
+```rust
+pub struct HnClickHouse {
+    // Insert operations (for ingestion)
+    pub async fn insert_ngram_counts(&self, rows: &[NgramCountRow])
+    pub async fn insert_bucket_totals(&self, rows: &[BucketTotalRow])
+    pub async fn insert_vocabulary(&self, rows: &[NgramVocabularyRow])
+
+    // Query operations (for API)
+    pub async fn query_ngrams(&self, n, ngrams, start, end) -> Vec<NgramQueryResult>
+    pub async fn query_ngrams_aggregated(&self, n, ngrams, start, end, granularity)
+    pub async fn check_vocabulary(&self, ngrams) -> Vec<bool>
+}
+```
+
+### Granularity enum
+```rust
+pub enum Granularity { Day, Week, Month, Year }
+```
+
+Uses `time` crate (not `chrono`) to match `clickhouse` crate's serde helpers.
+
+All queries use parameterized binding (no SQL injection risk).
 

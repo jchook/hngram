@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft → target: Accepted
+**Implemented** in `server/crates/tokenizer/src/counter.rs`
 
 ## Purpose
 
@@ -539,15 +539,15 @@ This is recommended but not required for v1. Initial deployment may simply re-ru
 
 ## 10. Vocabulary admission model
 
-To support pruning cleanly, define a vocabulary table:
+To support pruning cleanly, define a vocabulary table (see RFC-003 for schema):
 
 ```text
-admitted_ngrams(
+ngram_vocabulary(
   tokenizer_version,
   n,
   ngram,
-  admitted_at,
-  global_count_at_admission
+  global_count,
+  admitted_at
 )
 ```
 
@@ -558,6 +558,8 @@ Rules:
 * incremental jobs consult this vocabulary
 
 This keeps the ingest rules explicit and versionable.
+
+Implemented in Rust as `build_vocabulary()` function in `counter.rs`.
 
 ---
 
@@ -874,5 +876,32 @@ The winning design is:
 
 That will make the system fast, explainable, and stable.
 
-Next should be **RFC-003: ClickHouse schema, partitioning, and query model**.
+---
+
+## Implementation Notes
+
+Key types in `server/crates/tokenizer/src/counter.rs`:
+
+```rust
+pub struct PruningConfig {
+    pub min_bigram_global: u64,   // default: 20
+    pub min_trigram_global: u64,  // default: 10
+    pub min_bigram_bucket: u32,   // default: 3
+    pub min_trigram_bucket: u32,  // default: 5
+}
+
+pub struct NgramCounter {
+    counts: HashMap<NgramKey, u32>,
+    totals: HashMap<BucketKey, u64>,
+}
+```
+
+Key functions:
+- `NgramCounter::process_comment()` - counts n-grams for a single comment
+- `NgramCounter::merge()` - combines counters from parallel workers
+- `NgramCounter::global_counts()` - aggregates for vocabulary admission
+- `NgramCounter::prune_bucket_counts()` - applies per-bucket thresholds
+- `build_vocabulary()` - filters to admitted n-grams based on global thresholds
+
+All 12 RFC-002 tests pass.
 
