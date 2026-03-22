@@ -228,7 +228,7 @@ struct Point {
 
 * output sorted by time ascending
 * one series per input phrase (in input order)
-* for `Indexed` series: ALL buckets in range must be present (zero-fill gaps)
+* for `Indexed` series: return **sparse** points (only buckets with non-zero values). Frontend handles zero-fill.
 * for `NotIndexed` series: points array is empty
 * for `Invalid` series: points array is empty
 * `meta` includes actual parameters used (after defaults applied)
@@ -238,7 +238,8 @@ struct Point {
 ## Rationale
 
 * stable structure for frontend charting
-* zero-filling avoids frontend needing to normalize missing data
+* sparse responses reduce payload size and server work
+* frontend zero-fills using `meta.start`, `meta.end`, and `meta.granularity` (cheap client-side with dayjs)
 * `normalized` field shows what was actually looked up (aids debugging)
 * `meta` enables reproducible queries and debugging
 
@@ -296,50 +297,32 @@ Input: "this is a very long phrase"
 
 ---
 
-# 6. Zero-Fill Algorithm
+# 6. Sparse Response Model
 
 ## Spec (mandatory)
 
-For `Indexed` series, backend must return a point for every bucket in the requested range:
+For `Indexed` series, backend returns **only buckets with non-zero values** (sparse). The frontend is responsible for zero-filling gaps using `meta.start`, `meta.end`, and `meta.granularity`.
 
-```rust
-fn zero_fill(
-    data: HashMap<Date, f64>,
-    start: Date,
-    end: Date,
-    granularity: Granularity,
-) -> Vec<Point> {
-    let mut result = vec![];
-    let mut current = align_to_granularity(start, granularity);
-
-    while current <= end {
-        let value = data.get(&current).copied().unwrap_or(0.0);
-        result.push(Point { t: current.to_string(), v: value });
-        current = next_bucket(current, granularity);
-    }
-
-    result
-}
-```
+Points must still be sorted by time ascending.
 
 ---
 
-## Bucket alignment
+## Bucket alignment (for reference — applied by frontend during zero-fill)
 
 | Granularity | Alignment function |
 |-------------|-------------------|
 | Day | identity |
-| Week | `toStartOfWeek` (Monday) |
-| Month | `toStartOfMonth` |
-| Year | `toStartOfYear` |
+| Week | start of week (Monday) |
+| Month | start of month |
+| Year | start of year |
 
 ---
 
 ## Rationale
 
-* ensures continuous time series for charting
-* frontend receives ready-to-plot data
-* no client-side date math required
+* reduces network payload (many n-grams are sparse across time)
+* reduces server work (no bucket iteration/fill logic)
+* frontend has all the information needed to zero-fill (`meta` fields + dayjs)
 
 ---
 
@@ -613,7 +596,7 @@ System is valid if:
 * frontend SDK compiles without manual edits
 * all API types originate from Rust
 * queries return correct normalized results
-* zero-fill produces continuous time series
+* sparse responses contain only non-zero buckets
 * no type mismatch between backend and frontend
 * OpenAPI spec fully describes API
 * error responses follow defined schema
@@ -625,7 +608,7 @@ System is valid if:
 - [ ] `hn-clickhouse`: Add `HN_DEFAULT_START_DATE`, `MAX_PHRASES`, `MAX_NGRAM_ORDER` constants
 - [ ] `api`: Import constants from `hn-clickhouse`
 - [ ] `api`: Implement proper error response types
-- [ ] `api`: Implement zero-fill for indexed series
+- [ ] `api`: Return sparse points for indexed series (frontend handles zero-fill)
 - [ ] `api`: Add `meta` to response
 - [ ] `api`: Add `normalized` field to series
 - [ ] `api`: Validate all constraints (phrase count, date range, etc.)

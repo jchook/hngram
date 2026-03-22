@@ -77,8 +77,9 @@ Use:
 
 * React
 * TypeScript
-* Mantine
-* Kubb-generated SDK from OpenAPI
+* Mantine (including `@mantine/dates`)
+* dayjs (date library, required by Mantine dates)
+* Kubb-generated SDK from OpenAPI (types + React Query hooks)
 * TanStack Query
 * Apache ECharts
 
@@ -98,11 +99,11 @@ Use:
 
 Allowed:
 
-* React Router or equivalent lightweight router
 * Zustand only if local state becomes awkward
 
-Not allowed initially:
+Not allowed:
 
+* React Router (single view — use browser `URLSearchParams` + `history.pushState` directly)
 * Redux
 * XState
 * custom API client handwritten alongside generated one
@@ -185,28 +186,27 @@ Single-purpose tool. No need for multi-page product structure.
 
 ## Flexibility
 
-Allowed later:
+Secondary content (about, methodology) should use modals, not separate routes.
 
-* `/about`
-* `/methodology`
-
-Not required for v1.
+No router needed for v1.
 
 ---
 
-## 5. Routing and URL State
+## 5. URL State
 
 ## Spec (mandatory)
 
-All query state must be representable in the URL.
+All query state must be representable in the URL via query params.
 
-Use query params for:
+No router library. Use `URLSearchParams` + `history.pushState` / `popstate` directly.
+
+### URL params:
 
 * `q` = comma-separated phrases
-* `start` = ISO date
-* `end` = ISO date
+* `start` = ISO date (YYYY-MM-DD)
+* `end` = ISO date (YYYY-MM-DD)
 * `g` = granularity (`day|week|month|year`)
-* `s` = smoothing integer
+* `s` = smoothing integer (frontend-only, NOT sent to API)
 
 Example:
 
@@ -214,26 +214,29 @@ Example:
 /?q=rust,go,startups&start=2015-01-01&end=2025-01-01&g=month&s=3
 ```
 
+### Smoothing and the API query key
+
+The `s` param controls a frontend-only moving average (see §12). It is persisted in the URL for shareability but must NOT:
+
+* be sent to the backend API
+* be included in the TanStack Query key
+
+This means changing the smoothing slider is instant — no network round-trip.
+
 ---
 
 ## Requirements
 
 * loading a URL must reconstruct the UI state
-* editing controls must update URL
-* back/forward browser navigation must work
+* editing controls must update URL via `history.pushState`
+* back/forward browser navigation must work (`popstate` listener)
 * invalid URL params must degrade safely to defaults or validation errors
 
 ---
 
 ## Rationale
 
-URL shareability is core to this product.
-
----
-
-## Flexibility
-
-Agent may debounce URL updates slightly to reduce noise, but state must remain shareable and stable.
+URL shareability is core to this product. Browser APIs are sufficient for a single-view app — no router needed.
 
 ---
 
@@ -286,36 +289,72 @@ Do not introduce global client state store unless a concrete need emerges.
 
 ## Spec (mandatory)
 
-Frontend must use only Kubb-generated API types/client/hooks for backend communication.
+### Endpoint
 
-No hand-written duplicate request/response types.
+`GET /query` with query parameters (per RFC-005). Not a POST with JSON body.
+
+### SDK
+
+Frontend must use Kubb-generated React Query hooks and types for backend communication. No hand-written duplicate request/response types.
+
+Kubb is already configured to generate:
+
+* TypeScript types (from OpenAPI schemas)
+* React Query hooks (for GET endpoints)
+* A thin client adapter (`@/lib/client`)
+
+Use the generated hooks directly. They provide typed request params, typed responses, and automatic query key management.
+
+### Error handling
+
+The client adapter (`lib/client.ts`) must parse structured error responses from RFC-005:
+
+```json
+{ "error": { "code": "TOO_MANY_PHRASES", "message": "Maximum 10 phrases allowed" } }
+```
+
+The adapter must extract and surface the `error.code` and `error.message` fields so the UI can map them to user-friendly messages (see §19).
+
+### Response structure
+
+The API returns (per RFC-005):
+
+```typescript
+{
+  series: Array<{
+    phrase: string;       // original input
+    normalized: string;   // tokenized form used for lookup
+    status: "indexed" | "not_indexed" | "invalid";
+    points: Array<{ t: string; v: number }>;
+  }>;
+  meta: {
+    tokenizer_version: string;
+    start: string;
+    end: string;
+    granularity: string;
+  };
+}
+```
+
+The `meta` object is available for debugging but does not need prominent display in v1.
+
+### Phrase ordering contract
+
+The API returns `series[]` in the **same order** as the input `phrases` param. The frontend uses array index to match `series[i]` to `userInputPhrases[i]`.
 
 ---
 
 ## Requirements
 
 * generated code must be treated as read-only
-* app-specific wrappers are allowed only in thin adapter functions
-* query keys must be stable and derived from normalized request params
+* query keys must be stable and derived from request params (excluding smoothing)
+* `series[i]` matched to user input by index, not by string comparison
 
 ---
 
 ## Rationale
 
-Prevents frontend/backend drift and keeps API layer consistent with RFC-005.
-
----
-
-## Flexibility
-
-Agent may choose one of:
-
-* generated hooks directly
-* generated client + custom TanStack Query hooks
-
-Preferred approach for simplicity:
-
-* generated client + one thin app-level query hook
+Kubb-generated hooks eliminate SDK drift. Index-based matching avoids the problem of user input not matching the normalized form returned by the server.
 
 ---
 
@@ -384,19 +423,16 @@ Use two date inputs:
 * start date
 * end date
 
-Defaults:
+Defaults (matching API defaults from RFC-005):
 
-* sensible preset range if URL is empty
-* recommended default:
-
-  * `start = 2007-01-01`
-  * `end = today`
+* `start = 2011-01-01` (from `HN_DEFAULT_START_DATE` — when HN had meaningful comment volume)
+* `end = today`
 
 ---
 
 ### Rationale
 
-Simple and explicit. Avoid hidden date logic.
+Simple and explicit. Defaults match the API so omitting params produces consistent behavior.
 
 ---
 
@@ -427,7 +463,7 @@ Month is the best general default for readability and noise reduction.
 
 ### Spec
 
-Use a small integer control.
+Use a small integer control (slider or number input).
 
 Allowed values:
 
@@ -439,7 +475,9 @@ Default:
 
 Interpretation:
 
-* simple moving average window as defined by backend/frontend implementation from RFC-005
+* centered simple moving average applied **frontend-only** (per RFC-005)
+* changing this control does NOT trigger an API request
+* persisted in URL as `s` param for shareability
 
 ---
 
@@ -526,28 +564,16 @@ Must include:
 * start
 * end
 * granularity
-* smoothing if backend-applied
 
-If smoothing is frontend-applied, smoothing must not affect API query key.
+Must NOT include:
+
+* smoothing (frontend-only — not sent to API)
 
 ---
 
 ## Rationale
 
-Ensures correct cache behavior and avoids unnecessary requests.
-
----
-
-## Flexibility
-
-Agent may choose whether smoothing is backend-side or frontend-side per RFC-005.
-
-Preferred for simplicity:
-
-* fetch unsmoothed series
-* apply smoothing in frontend memoized transform
-
-This reduces API complexity and makes slider changes instant.
+Smoothing is applied client-side (per RFC-005). Excluding it from the query key means changing the smoothing slider reuses cached data — no network request.
 
 ---
 
@@ -563,7 +589,7 @@ Chart must support:
 
 * multiple series
 * hover tooltip
-* legend
+* legend (using user-entered phrase text, not server-normalized form)
 * responsive resize
 
 Preferred additional support:
@@ -646,7 +672,25 @@ N-gram frequencies will often be very small.
 
 ---
 
-## 11.4 Series Color
+## 11.4 Series Labels
+
+### Spec
+
+Chart legend and tooltip must display the **user-entered phrase** (trimmed), NOT the server-returned `normalized` form.
+
+The frontend matches `series[i]` to `userInputPhrases[i]` by array index (see §7 phrase ordering contract).
+
+The `normalized` field may optionally be shown in a secondary position (e.g., tooltip detail) for debugging, but never as the primary label.
+
+Example:
+
+* User enters: `Node.js, C++`
+* Server normalizes to: `node.js, c++`
+* Chart legend shows: `Node.js`, `C++` (user's casing)
+
+---
+
+## 11.5 Series Color
 
 ### Spec
 
@@ -656,32 +700,30 @@ No user-configurable color system in v1.
 
 ---
 
-## 11.5 Missing Buckets
+## 11.6 Missing Buckets
 
 ### Spec
 
-Chart input must already be zero-filled into continuous series before rendering.
+The backend returns **sparse** data — only buckets with non-zero counts. The frontend must zero-fill gaps to produce continuous series before rendering.
+
+Zero-fill is a frontend responsibility (along with smoothing) to reduce network payload and server work.
+
+For `not_indexed` or `invalid` series, `points` is empty — do not render a line (see §13).
 
 ---
 
-## Rationale
-
-Avoid broken lines and frontend ambiguity.
-
----
-
-## 11.6 Smoothing Display
+## 11.7 Smoothing Display
 
 ### Spec
 
 If smoothing > 0:
 
 * display smoothed values in chart
-* indicate smoothing in UI near chart or controls
+* indicate smoothing window in UI near chart or controls (e.g., "smoothing: 3")
 
 Optional:
 
-* retain raw values in tooltip if easy
+* show raw (unsmoothed) value in tooltip alongside smoothed value
 
 ---
 
@@ -693,18 +735,55 @@ Create a small transformation layer between API response and chart props.
 
 Responsibilities:
 
-* zero-fill buckets if not already done
-* apply smoothing if frontend-side
+* zero-fill sparse backend data into continuous bucket sequences (given start, end, granularity)
+* apply centered moving average smoothing (frontend-only)
 * map API data into ECharts series format
 * format tooltip values
+* match series to user-entered phrases by index
+
+NOT frontend responsibilities (handled by backend):
+
+* tokenization / normalization — backend handles via RFC-001
 
 This logic must not be embedded directly in page JSX.
+
+### Zero-fill implementation
+
+The frontend must generate the expected bucket sequence from `start`, `end`, and `granularity`, then fill in values from the sparse backend data. Use dayjs for bucket alignment:
+
+* `day` — increment by 1 day
+* `week` — align to Monday, increment by 7 days
+* `month` — align to 1st of month, increment by 1 month
+* `year` — align to Jan 1, increment by 1 year
+
+Missing buckets get `v: 0`.
+
+### Smoothing implementation
+
+```typescript
+function applySmoothing(points: Point[], window: number): Point[] {
+  if (window <= 1) return points;
+  return points.map((point, i) => {
+    const start = Math.max(0, i - Math.floor(window / 2));
+    const end = Math.min(points.length, i + Math.ceil(window / 2));
+    const slice = points.slice(start, end);
+    const avg = slice.reduce((sum, p) => sum + p.v, 0) / slice.length;
+    return { t: point.t, v: avg };
+  });
+}
+```
+
+### Transform pipeline
+
+For each indexed series: `sparse points → zero-fill → smooth → ECharts format`
+
+Both zero-fill and smoothing are memoized so that only the affected step re-runs when inputs change (e.g., smoothing slider doesn't re-fetch or re-zero-fill).
 
 ---
 
 ## Rationale
 
-Keeps page component simple and prevents chart-coupled business logic from spreading.
+Keeping zero-fill and smoothing frontend-side reduces network payload (sparse data) and server work. Smoothing slider changes are instant with no API round-trip. Zero-fill is cheap client-side with dayjs.
 
 ---
 
@@ -990,11 +1069,13 @@ These would add complexity without helping the core product.
 Frontend is valid if:
 
 * user can enter phrases and run query
-* URL fully represents query state
+* URL fully represents query state (including frontend-only smoothing)
 * browser navigation restores state correctly
-* chart renders one line per phrase
-* loading/error/empty states are handled
-* frontend uses generated API types/client
+* chart renders one line per phrase, labeled with user-entered text (not normalized)
+* sparse backend data is zero-filled into continuous series
+* smoothing is applied client-side with no API round-trip
+* loading/error/empty/not-indexed states are handled
+* frontend uses Kubb-generated API types and React Query hooks
 * implementation remains small and understandable
 
 ---
