@@ -205,8 +205,8 @@ No router library. Use `URLSearchParams` + `history.pushState` / `popstate` dire
 * `q` = comma-separated phrases
 * `start` = ISO date (YYYY-MM-DD)
 * `end` = ISO date (YYYY-MM-DD)
-* `g` = granularity (`day|week|month|year`)
-* `s` = smoothing integer (frontend-only, NOT sent to API)
+* `g` = granularity (`day|week|month|year`) — frontend-only, NOT sent to API
+* `s` = smoothing integer — frontend-only, NOT sent to API
 
 Example:
 
@@ -214,14 +214,14 @@ Example:
 /?q=rust,go,startups&start=2015-01-01&end=2025-01-01&g=month&s=3
 ```
 
-### Smoothing and the API query key
+### Granularity, smoothing, and the API query key (RFC-007-optimizations §3)
 
-The `s` param controls a frontend-only moving average (see §12). It is persisted in the URL for shareability but must NOT:
+Both `g` (granularity) and `s` (smoothing) are **frontend-only display parameters**. They are persisted in the URL for shareability but must NOT:
 
 * be sent to the backend API
 * be included in the TanStack Query key
 
-This means changing the smoothing slider is instant — no network round-trip.
+The API always returns daily raw counts. The frontend aggregates to the requested granularity and applies smoothing. Changing either is instant — no network round-trip.
 
 ---
 
@@ -563,17 +563,17 @@ Must include:
 * phrases
 * start
 * end
-* granularity
 
 Must NOT include:
 
+* granularity (frontend-only — not sent to API, per RFC-007-optimizations §3)
 * smoothing (frontend-only — not sent to API)
 
 ---
 
 ## Rationale
 
-Smoothing is applied client-side (per RFC-005). Excluding it from the query key means changing the smoothing slider reuses cached data — no network request.
+Granularity and smoothing are applied client-side. Excluding them from the query key means changing either reuses cached data — no network request.
 
 ---
 
@@ -733,11 +733,13 @@ Optional:
 
 Create a small transformation layer between API response and chart props.
 
-Responsibilities:
+Responsibilities (RFC-007-optimizations §2-4):
 
-* zero-fill sparse backend data into continuous bucket sequences (given start, end, granularity)
-* apply centered moving average smoothing (frontend-only)
-* map API data into ECharts series format
+* zero-fill sparse backend data into continuous daily bucket sequences
+* aggregate daily data to requested granularity (week/month/year)
+* compute relative frequency using cached `/totals` data
+* apply centered moving average smoothing
+* map data into ECharts series format
 * format tooltip values
 * match series to user-entered phrases by index
 
@@ -749,14 +751,41 @@ This logic must not be embedded directly in page JSX.
 
 ### Zero-fill implementation
 
-The frontend must generate the expected bucket sequence from `start`, `end`, and `granularity`, then fill in values from the sparse backend data. Use dayjs for bucket alignment:
+The frontend must generate the expected daily bucket sequence from `start` and `end`, then fill in values from the sparse backend data.
 
-* `day` — increment by 1 day
+Missing buckets get `v: 0`.
+
+### Granularity aggregation (RFC-007-optimizations §3)
+
+After zero-fill, aggregate daily counts to the requested granularity:
+
+```typescript
+function aggregateToGranularity(
+  dailyCounts: Point[],
+  dailyTotals: TotalPoint[],
+  granularity: 'day' | 'week' | 'month' | 'year'
+): ChartPoint[] {
+  if (granularity === 'day') {
+    return dailyCounts.map(c => ({
+      t: c.t,
+      v: c.v / getTotalForDay(dailyTotals, c.t)
+    }));
+  }
+  // Group daily counts and totals by period, sum each, divide
+  const periods = groupByPeriod(dailyCounts, granularity);
+  const totalPeriods = groupByPeriod(dailyTotals, granularity);
+  return periods.map(p => ({
+    t: p.periodStart,
+    v: p.sumCounts / totalPeriods.get(p.periodStart)
+  }));
+}
+```
+
+Use dayjs for bucket alignment:
+
 * `week` — align to Monday, increment by 7 days
 * `month` — align to 1st of month, increment by 1 month
 * `year` — align to Jan 1, increment by 1 year
-
-Missing buckets get `v: 0`.
 
 ### Smoothing implementation
 
@@ -775,15 +804,28 @@ function applySmoothing(points: Point[], window: number): Point[] {
 
 ### Transform pipeline
 
-For each indexed series: `sparse points → zero-fill → smooth → ECharts format`
+```text
+sparse raw counts (from /query)
+  + cached totals (from /totals)
+  → zero-fill daily counts
+  → aggregate to granularity (sum counts and totals per period, divide)
+  → apply smoothing
+  → ECharts format
+```
 
-Both zero-fill and smoothing are memoized so that only the affected step re-runs when inputs change (e.g., smoothing slider doesn't re-fetch or re-zero-fill).
+Each step is independently memoizable:
+
+* zero-fill — recomputes only when raw data or date range changes
+* aggregation — recomputes only when granularity changes
+* smoothing — recomputes only when smoothing window changes
+
+Changing granularity or smoothing reuses cached API data — no network request.
 
 ---
 
 ## Rationale
 
-Keeping zero-fill and smoothing frontend-side reduces network payload (sparse data) and server work. Smoothing slider changes are instant with no API round-trip. Zero-fill is cheap client-side with dayjs.
+Keeping zero-fill, granularity aggregation, frequency computation, and smoothing frontend-side reduces network payload (sparse data) and server work. Granularity and smoothing changes are instant with no API round-trip. All transforms are simple array arithmetic, trivial in JS.
 
 ---
 

@@ -120,27 +120,12 @@ struct QueryParams {
     start: Option<String>,
     /// End date (YYYY-MM-DD). Default: today
     end: Option<String>,
-    /// Time granularity. Default: month
-    granularity: Option<String>,
 }
 ```
 
 Note: `phrases` is a comma-separated string (not array) for clean shareable URLs.
 
----
-
-### Granularity Values
-
-```rust
-enum Granularity {
-    Day,
-    Week,
-    Month,  // default
-    Year,
-}
-```
-
-Parsed from query string: `day`, `week`, `month`, `year` (case-insensitive).
+Note: `granularity` was removed from the API (RFC-007-optimizations §3). The API always returns daily data. Granularity aggregation is performed client-side, like smoothing.
 
 ---
 
@@ -159,7 +144,6 @@ Parsed from query string: `day`, `week`, `month`, `year` (case-insensitive).
 |-----------|---------|--------|
 | `start` | `2011-01-01` | `hn_clickhouse::HN_DEFAULT_START_DATE` |
 | `end` | today | computed at request time |
-| `granularity` | `month` | `Granularity::default()` |
 
 The default start date (2011) is when HN reached ~1M comments/year, providing meaningful data density.
 
@@ -218,7 +202,7 @@ enum SeriesStatus {
 #[derive(Serialize, ToSchema)]
 struct Point {
     t: String,     // bucket timestamp (YYYY-MM-DD)
-    v: f64,        // relative frequency
+    v: u32,        // raw occurrence count (RFC-007-optimizations §2)
 }
 ```
 
@@ -228,10 +212,11 @@ struct Point {
 
 * output sorted by time ascending
 * one series per input phrase (in input order)
-* for `Indexed` series: return **sparse** points (only buckets with non-zero values). Frontend handles zero-fill.
+* for `Indexed` series: return **sparse** points (only buckets with non-zero counts). Frontend handles zero-fill.
 * for `NotIndexed` series: points array is empty
 * for `Invalid` series: points array is empty
 * `meta` includes actual parameters used (after defaults applied)
+* `Point.v` is a raw count (`u32`), NOT a relative frequency — client computes frequency using `/totals` endpoint
 
 ---
 
@@ -239,7 +224,9 @@ struct Point {
 
 * stable structure for frontend charting
 * sparse responses reduce payload size and server work
+* raw counts eliminate the JOIN with `bucket_totals` on every query (RFC-007-optimizations §2)
 * frontend zero-fills using `meta.start`, `meta.end`, and `meta.granularity` (cheap client-side with dayjs)
+* frontend computes relative frequency using cached `/totals` data
 * `normalized` field shows what was actually looked up (aids debugging)
 * `meta` enables reproducible queries and debugging
 
@@ -326,28 +313,82 @@ Points must still be sorted by time ascending.
 
 ---
 
-# 7. Granularity Handling
+# 6.1 Totals Endpoint (RFC-007-optimizations §2)
 
-## Spec
+## Spec (mandatory)
 
-* base storage: daily
-* derived via SQL aggregation (RFC-003 Section 8)
-
-Mapping:
+### Route
 
 ```text
-Day   → raw bucket (no aggregation)
-Week  → toStartOfWeek + GROUP BY
-Month → toStartOfMonth + GROUP BY
-Year  → toStartOfYear + GROUP BY
+GET /totals
 ```
+
+### Query Parameters
+
+```rust
+#[derive(Deserialize, IntoParams)]
+struct TotalsParams {
+    /// Start date (YYYY-MM-DD). Default: 2011-01-01
+    start: Option<String>,
+    /// End date (YYYY-MM-DD). Default: today
+    end: Option<String>,
+}
+```
+
+### Response Schema
+
+```rust
+#[derive(Serialize, ToSchema)]
+struct TotalsResponse {
+    totals: Vec<TotalSeries>,  // one per n-gram order (1, 2, 3)
+    meta: TotalsMeta,
+}
+
+#[derive(Serialize, ToSchema)]
+struct TotalSeries {
+    n: u8,                      // n-gram order (1, 2, or 3)
+    points: Vec<TotalPoint>,    // sparse daily totals
+}
+
+#[derive(Serialize, ToSchema)]
+struct TotalPoint {
+    t: String,  // YYYY-MM-DD
+    v: u64,     // total n-gram count for this day and order
+}
+```
+
+### Caching
+
+Response includes `Cache-Control: public, max-age=86400` — totals change only on ingestion.
 
 ---
 
 ## Rationale
 
-* avoids storing redundant aggregates
-* `hn-clickhouse` crate provides both `query_ngrams` (daily) and `query_ngrams_aggregated` (other)
+* eliminates the JOIN between `ngram_counts` and `bucket_totals` on every `/query` request
+* totals are small (~5,400 days × 3 n-orders) and change only on ingestion
+* client fetches totals once, caches locally, and computes relative frequency: `count / total`
+* main `/query` becomes a pure indexed key lookup in ClickHouse
+
+---
+
+# 7. Granularity Handling (RFC-007-optimizations §3)
+
+## Spec
+
+* base storage: daily
+* API always returns **daily** data — no `granularity` parameter
+* granularity aggregation (week/month/year) is performed **client-side**
+* `granularity` is a frontend-only display parameter (like smoothing), persisted in URL as `g` but NOT sent to API
+
+---
+
+## Rationale
+
+* eliminates server-side GROUP BY
+* one cache key per (phrases, date range) regardless of granularity
+* switching granularity is instant — no network round-trip
+* daily data for 15 years is ~5,400 points per series (~100KB per series, ~200-300KB gzipped for 10 series)
 
 ---
 
@@ -441,8 +482,19 @@ struct ErrorDetail {
 
 * all request/response types must derive `ToSchema`
 * all endpoints must use `#[utoipa::path(...)]`
-* OpenAPI spec served at: `/api-doc/openapi.json`
+* OpenAPI spec served at runtime: `/api-doc/openapi.json`
 * Swagger UI served at: `/swagger-ui`
+* Static spec exported to `server/openapi.json` via: `cargo run -p api --bin generate_openapi`
+* `server/openapi.json` is the input for Kubb SDK generation
+
+### Export workflow
+
+```bash
+cd server && cargo run -p api --bin generate_openapi > openapi.json
+cd client && bun run generate
+```
+
+The `generate_openapi` binary imports the `ApiDoc` struct from `api::lib` and serializes it to JSON. This ensures the static file always matches the Rust types exactly.
 
 ---
 
@@ -450,6 +502,7 @@ struct ErrorDetail {
 
 * enables automatic SDK generation
 * Swagger UI aids development and debugging
+* static export enables offline SDK generation without running the API server
 
 ---
 
@@ -457,6 +510,7 @@ struct ErrorDetail {
 
 * no undocumented endpoints
 * no untyped request/response bodies
+* `server/openapi.json` must be regenerated after any API type change
 
 ---
 
@@ -485,7 +539,46 @@ struct ErrorDetail {
 
 ---
 
-# 12. Rate Limiting
+# 12. HTTP Caching (RFC-007-optimizations §1)
+
+## Spec (mandatory)
+
+N-gram data is effectively immutable between ingestion runs. API responses must include `Cache-Control` headers.
+
+### Response headers
+
+```text
+Cache-Control: public, max-age=3600
+```
+
+Set directly by the Rust API on `/query` responses (and `/totals` when added).
+
+### Static assets
+
+Caddy sets `Cache-Control: public, max-age=31536000, immutable` on JS/CSS/image/font files.
+
+### Cache invalidation
+
+Cache expires naturally via `max-age`. On ingestion, new data appears after TTL expiry. No explicit purge mechanism in v1.
+
+---
+
+## Rationale
+
+* data changes only on ingestion (daily at most)
+* repeated queries for popular phrases are served from intermediary caches
+* highest-ROI optimization with near-zero complexity
+
+---
+
+## Flexibility
+
+* `max-age` may be increased for historical date ranges that can never change
+* may add `ETag` based on last ingestion timestamp in future
+
+---
+
+# 13. Rate Limiting
 
 ## Spec (mandatory)
 
@@ -529,7 +622,7 @@ api.example.com {
 
 ---
 
-# 13. Versioning
+# 14. Versioning
 
 ## Spec
 
@@ -546,7 +639,7 @@ api.example.com {
 
 ---
 
-# 14. Constants
+# 15. Constants
 
 ## Spec (mandatory)
 
@@ -575,7 +668,7 @@ API crate imports these constants - no hardcoded values.
 
 ---
 
-# 15. Prohibited Designs
+# 16. Prohibited Designs
 
 Agent must NOT:
 
@@ -589,7 +682,7 @@ Agent must NOT:
 
 ---
 
-# 16. Acceptance Criteria
+# 17. Acceptance Criteria
 
 System is valid if:
 

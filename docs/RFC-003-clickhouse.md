@@ -313,29 +313,38 @@ Reason:
 
 ## Spec (mandatory)
 
+### N-gram counts query (no JOIN — RFC-007-optimizations §2)
+
 ```sql
-SELECT
-    c.bucket,
-    c.ngram,
-    c.count / t.total_count AS rel_freq
-FROM ngram_counts c
-JOIN bucket_totals t
-    ON c.bucket = t.bucket
-   AND c.n = t.n
-   AND c.tokenizer_version = t.tokenizer_version
+SELECT bucket, ngram, count
+FROM ngram_counts
 WHERE
-    c.tokenizer_version = ?
-    AND c.n = ?
-    AND c.ngram IN (...)
-    AND c.bucket BETWEEN ? AND ?
-ORDER BY c.bucket;
+    tokenizer_version = ?
+    AND n = ?
+    AND ngram IN (...)
+    AND bucket BETWEEN ? AND ?
+ORDER BY bucket;
 ```
+
+### Bucket totals query (separate endpoint, cached aggressively)
+
+```sql
+SELECT tokenizer_version, n, bucket, total_count
+FROM bucket_totals
+WHERE
+    tokenizer_version = ?
+    AND bucket BETWEEN ? AND ?
+ORDER BY n, bucket;
+```
+
+Client computes `relative_frequency = count / total_count` using cached totals.
 
 ---
 
 ## Requirements
 
 * must not require GROUP BY for base query
+* must not require JOIN for base query (totals served separately)
 * must return one row per `(bucket, ngram)`
 * missing rows interpreted as zero by application layer
 
@@ -345,6 +354,7 @@ ORDER BY c.bucket;
 
 * pre-aggregation moves complexity to ingestion
 * queries remain simple and fast
+* separating totals eliminates JOIN overhead and enables aggressive caching
 
 ---
 

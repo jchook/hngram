@@ -6,10 +6,10 @@
 
 ## Checklist
 
-- [ ] 1. HTTP response caching (Caddy layer)
-- [ ] 2. Separate `/totals` endpoint with aggressive caching
-- [ ] 3. Client-side granularity aggregation (always return daily data)
-- [ ] 4. Client-side relative frequency computation
+- [x] 1. HTTP response caching (Caddy layer)
+- [x] 2. Separate `/totals` endpoint with aggressive caching
+- [x] 3. Client-side granularity aggregation (always return daily data)
+- [x] 4. Client-side relative frequency computation
 - [ ] 5. Pre-computed monthly materialized view (alternative to #3)
 - [ ] 6. Client-side vocabulary status inference
 
