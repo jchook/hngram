@@ -479,7 +479,68 @@ O(#ngrams × #buckets)
 
 ---
 
-# 12. Prohibited Designs
+# 12. Low-Memory Configuration (Required for Small VPS)
+
+## Spec (mandatory for 2-4GB RAM hosts)
+
+ClickHouse must be configured for low-memory operation.
+
+### Required settings
+
+```xml
+<clickhouse>
+  <!-- Limit total server memory usage -->
+  <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+
+  <!-- Limit per-query memory (500MB) -->
+  <max_memory_usage>500000000</max_memory_usage>
+
+  <!-- Limit memory for all queries combined (1GB) -->
+  <max_memory_usage_for_all_queries>1000000000</max_memory_usage_for_all_queries>
+
+  <!-- Reduce background merge memory -->
+  <background_pool_size>2</background_pool_size>
+  <background_schedule_pool_size>2</background_schedule_pool_size>
+
+  <!-- Limit mark cache (default 5GB is too high) -->
+  <mark_cache_size>134217728</mark_cache_size> <!-- 128MB -->
+
+  <!-- Limit uncompressed cache -->
+  <uncompressed_cache_size>67108864</uncompressed_cache_size> <!-- 64MB -->
+</clickhouse>
+```
+
+### User-level settings (in users.xml or via SET)
+
+```xml
+<profiles>
+  <default>
+    <max_memory_usage>500000000</max_memory_usage>
+    <max_bytes_before_external_group_by>200000000</max_bytes_before_external_group_by>
+    <max_bytes_before_external_sort>200000000</max_bytes_before_external_sort>
+  </default>
+</profiles>
+```
+
+---
+
+## Rationale
+
+* default ClickHouse settings assume large servers
+* on 2-4GB VPS, defaults will cause OOM or swap thrashing
+* these settings trade latency for memory safety
+* pre-aggregated data means queries are lightweight anyway
+
+---
+
+## Flexibility
+
+* values may be tuned based on actual workload
+* if upgrading to 8GB+ host, these limits can be relaxed
+
+---
+
+# 13. Prohibited Designs
 
 Agent must NOT implement:
 
@@ -491,7 +552,7 @@ Agent must NOT implement:
 
 ---
 
-# 13. Versioning
+# 14. Versioning
 
 ## Spec
 
@@ -506,7 +567,7 @@ Agent must NOT implement:
 
 ---
 
-# 14. Acceptance Criteria
+# 15. Acceptance Criteria
 
 System is valid if:
 

@@ -161,7 +161,14 @@ struct QueryResponse {
 
 struct Series {
     phrase: String,
+    status: SeriesStatus,
     points: Vec<Point>,
+}
+
+enum SeriesStatus {
+    Indexed,      // phrase is in vocabulary, data returned
+    NotIndexed,   // phrase is NOT in vocabulary (too rare historically)
+    Invalid,      // phrase failed validation (e.g., > 3 tokens)
 }
 
 struct Point {
@@ -176,7 +183,9 @@ struct Point {
 
 * output sorted by time ascending
 * one series per input phrase
-* missing buckets must be filled (value = 0.0)
+* for `Indexed` series: missing buckets must be filled (value = 0.0)
+* for `NotIndexed` series: points array is empty
+* for `Invalid` series: points array is empty
 
 ---
 
@@ -184,6 +193,7 @@ struct Point {
 
 * stable structure for frontend charting
 * avoids frontend needing to normalize missing data
+* status field enables frontend to distinguish "legitimately zero" from "not tracked"
 
 ---
 
@@ -291,26 +301,41 @@ Year  → toStartOfYear
 
 # 8. Smoothing
 
-## Spec
+## Spec (recommended)
 
-* smoothing applied after query
-* simple moving average
+* smoothing should be applied **frontend-side**
+* API returns raw (unsmoothed) series data
+* frontend applies simple moving average in memoized transform
 
 ---
 
 ## Rationale
 
-* keeps DB layer simple
-* allows UI flexibility
+* keeps API surface minimal
+* smoothing slider changes become instant (no round-trip)
+* reduces API complexity and cache variations
+* raw data is more useful for future features
+
+---
+
+## Implementation
+
+Frontend applies smoothing via:
+
+```typescript
+function applySmoothing(points: Point[], window: number): Point[] {
+  // simple moving average over `window` buckets
+}
+```
+
+Memoize this transform based on `(points, window)`.
 
 ---
 
 ## Flexibility
 
-* smoothing may be implemented:
-
-  * backend OR
-  * frontend
+* backend-side smoothing is allowed if there is a compelling reason
+* if implemented backend-side, `smoothing` becomes part of query key (affects caching)
 
 ---
 
@@ -419,7 +444,61 @@ API must return structured errors:
 
 ---
 
-# 12. Versioning
+# 12. Rate Limiting
+
+## Spec (mandatory)
+
+API must implement basic rate limiting to prevent abuse.
+
+### Recommended limits
+
+* **per-IP**: 60 requests/minute
+* **burst**: 10 requests/second
+
+### Implementation options
+
+1. **Caddy rate_limit directive** (preferred for simplicity)
+
+```caddyfile
+rate_limit {
+  zone api {
+    key {remote_host}
+    events 60
+    window 1m
+  }
+}
+```
+
+2. **Rust middleware** (tower-governor or similar)
+
+```rust
+use tower_governor::{GovernorLayer, GovernorConfigBuilder};
+
+let config = GovernorConfigBuilder::default()
+    .per_second(10)
+    .burst_size(60)
+    .finish()
+    .unwrap();
+```
+
+---
+
+## Rationale
+
+* public API without rate limiting is vulnerable to abuse
+* even accidental client bugs can cause excessive load
+* small VPS has limited resources
+
+---
+
+## Flexibility
+
+* exact limits may be tuned based on observed traffic
+* may add per-route limits if needed
+
+---
+
+# 13. Versioning
 
 ## Spec
 
@@ -442,7 +521,7 @@ API must return structured errors:
 
 ---
 
-# 13. Prohibited Designs
+# 14. Prohibited Designs
 
 Agent must NOT:
 
@@ -454,7 +533,7 @@ Agent must NOT:
 
 ---
 
-# 14. Acceptance Criteria
+# 15. Acceptance Criteria
 
 System is valid if:
 

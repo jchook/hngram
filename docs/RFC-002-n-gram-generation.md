@@ -287,6 +287,27 @@ These defaults are intentionally conservative and should be revisited after meas
 
 ---
 
+## 8.5 Empirical Threshold Validation
+
+### Spec (mandatory before production)
+
+Before finalizing thresholds, run pass 1 on a representative sample (e.g., 1-2 years of data) and measure:
+
+* total unique bigrams at thresholds: 5, 10, 20, 50
+* total unique trigrams at thresholds: 5, 10, 20, 50
+* estimated storage size at each threshold
+* coverage: what percentage of query-likely phrases are retained?
+
+Document final chosen values with justification.
+
+### Acceptance criteria
+
+* storage remains under target budget
+* common technical phrases (e.g., "machine learning", "large language model") are retained
+* rare garbage phrases are excluded
+
+---
+
 ## 8.2 Why prune by global count
 
 Prune by **global total count across all time**, not by per-day count.
@@ -462,16 +483,57 @@ This two-pass design is simpler and produces a cleaner final index.
 
 For live updates:
 
+* process only new data (e.g., "today" partitions)
 * only count n-grams that already exist in the admitted vocabulary for 2-grams and 3-grams
 * all unigrams continue to be counted
 
 This avoids vocabulary explosion during steady-state updates.
 
-### Optional future enhancement
+---
 
-Periodically run an admission job on recent raw aggregates to promote newly popular bigrams/trigrams into the vocabulary.
+## 9.3 Pending Vocabulary (Recommended)
 
-But not required in v1.
+### Problem
+
+Incremental updates only count admitted n-grams. New phrases that emerge after historical build (e.g., "llama 3" appearing in 2024) will not be indexed until vocabulary re-admission.
+
+### Solution
+
+Maintain a **pending vocabulary** table:
+
+```text
+pending_ngrams(
+  tokenizer_version,
+  n,
+  ngram,
+  first_seen,
+  running_count
+)
+```
+
+During incremental updates:
+
+* for n-grams NOT in admitted vocabulary, increment `running_count` in pending table
+* do NOT write to `ngram_counts` yet
+
+### Promotion job (periodic)
+
+Run weekly or monthly:
+
+* scan `pending_ngrams` where `running_count >= threshold`
+* promote to `admitted_ngrams`
+* backfill historical buckets if desired (optional)
+* clear promoted entries from pending table
+
+### Rationale
+
+* new technical terms get indexed eventually
+* avoids unbounded vocabulary growth during normal operation
+* keeps incremental path fast
+
+### Flexibility
+
+This is recommended but not required for v1. Initial deployment may simply re-run full admission periodically.
 
 ---
 
@@ -514,7 +576,47 @@ Reason:
 * prevents surprise slow queries
 * avoids a second query engine path
 
-Future versions may add “slow path” raw scans, but not now.
+Future versions may add "slow path" raw scans, but not now.
+
+---
+
+## 11.1 Query Result Status (Required)
+
+### Spec
+
+API response must distinguish between:
+
+1. **`indexed`**: phrase is in vocabulary, data returned (may be zero in some buckets)
+2. **`not_indexed`**: phrase is NOT in vocabulary (too rare historically)
+3. **`invalid`**: phrase failed validation (e.g., > 3 tokens)
+
+### Response structure
+
+```json
+{
+  "series": [
+    {
+      "phrase": "machine learning",
+      "status": "indexed",
+      "points": [...]
+    },
+    {
+      "phrase": "xyzzy foobar baz",
+      "status": "not_indexed",
+      "points": []
+    }
+  ]
+}
+```
+
+### Rationale
+
+Frontend must clearly communicate to users:
+
+* "This phrase had zero occurrences in this time range" (indexed, legitimately zero)
+* "This phrase is not indexed because it was historically too rare" (not_indexed)
+
+These are different user experiences and require different messaging.
 
 ---
 

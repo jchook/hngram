@@ -727,24 +727,53 @@ Infrastructure is valid if:
 
 Start with:
 
-* Linode $12/mo host with 50GB of storage and 2GB of RAM
-* Debian host
+* **Hetzner CX22** (~€4.51/mo, 2 vCPU, 4GB RAM, 40GB disk) OR
+* **Linode 4GB** ($24/mo, 2 vCPU, 4GB RAM, 80GB disk)
+* Debian 12 host
 * Docker Engine + Compose plugin
-* Caddy
+* Caddy (reverse proxy + TLS)
 * Rust API container
-* static frontend served by Caddy
+* Static frontend served by Caddy
 * ClickHouse container with bind-mounted data directory
-* manual backup to off-host storage
+* ClickHouse configured per RFC-003 §12 (low-memory settings)
+* Manual backup to off-host storage
+
+### Alternative minimum viable deployment
+
+If budget is extremely tight and dataset is confirmed small:
+
+* **Linode 2GB** ($12/mo, 1 vCPU, 2GB RAM, 50GB disk)
+* Requires aggressive ClickHouse memory tuning
+* Acceptable for initial testing, but upgrade path should be planned
 
 ---
 
 ## Rationale
 
-This is the simplest cheap setup that still has enough headroom.
+4GB RAM provides comfortable headroom for:
+* ClickHouse memory requirements
+* Rust API
+* Caddy
+* Docker overhead
+* Operating system
 
-Each month of data has between 10-100MB of raw data. Over 20 years, this is under 20GB. And the data will be much smaller when turned into ngram ClickHouse storage.
+2GB is possible but requires careful tuning and leaves no margin for growth.
 
-This allows us to run a very lean instance, esp if we configure ClickHouse correctly for a low memory system with higher latency per request.
+Each month of HN data is 10-100MB raw. Over 20 years, this is under 20GB. N-gram aggregates will be much smaller.
+
+---
+
+## ClickHouse Configuration (Required)
+
+Apply low-memory settings from RFC-003 §12:
+
+```xml
+<max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+<max_memory_usage>500000000</max_memory_usage>
+<mark_cache_size>134217728</mark_cache_size>
+```
+
+Without these settings, ClickHouse will attempt to use default memory allocations designed for large servers and will cause OOM or swap thrashing on a small VPS.
 
 ---
 
@@ -768,8 +797,10 @@ Avoid:
 The correct mental model is:
 **“small static-ish analytical web app with a precomputed database”**, not “distributed data platform.”
 
-If you want, I can also turn the whole set of RFCs into a single ordered implementation plan/checklist next.
+---
 
-[1]: https://www.akamai.com/cloud/pricing?utm_source=chatgpt.com "Cloud Computing Costs and Pricing"
-[2]: https://www.hetzner.com/de/pressroom/new-cx-plans/?utm_source=chatgpt.com "Hetzner stellt neue Shared vCPU Cloud Tarife vor"
+## References
+
+* [Akamai/Linode Cloud Pricing](https://www.akamai.com/cloud/pricing)
+* [Hetzner Cloud Server Pricing](https://www.hetzner.com/cloud)
 

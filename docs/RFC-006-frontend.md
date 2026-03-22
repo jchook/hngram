@@ -596,7 +596,6 @@ Wrap chart setup behind a small local component boundary, e.g.:
 ```jsx
 <TimeSeriesChart />
 ```
-```
 
 Do not scatter ECharts option-building logic across the app.
 
@@ -738,14 +737,37 @@ Show:
 
 Show:
 
-* explicit “no data” or “no indexed matches” message
+* explicit "no data" or "no indexed matches" message
 * not a blank chart
+
+### Not Indexed vs Zero (Important)
+
+Frontend must distinguish between two different "empty" cases per RFC-002 §11.1:
+
+1. **Indexed but zero**: phrase is in vocabulary, but has zero occurrences in selected range
+   - Show the series line at y=0
+   - Normal behavior, no special messaging needed
+
+2. **Not indexed**: phrase is NOT in vocabulary (historically too rare)
+   - Show inline warning: "This phrase is not indexed (too rare historically)"
+   - Do not show a flat zero line (misleading)
+   - Use `status` field from API response to detect
+
+Example UI:
+
+```
+┌─────────────────────────────────────────────┐
+│ "rust"           ✓ indexed                  │
+│ "machine learning" ✓ indexed                │
+│ "xyzzy foobar"   ⚠ not indexed (too rare)   │
+└─────────────────────────────────────────────┘
+```
 
 ---
 
 ## Rationale
 
-These states are common and must be obvious.
+These states are common and must be obvious. Users need to understand why data is missing.
 
 ---
 

@@ -195,47 +195,73 @@ Preserve:
 
 Rule:
 
-* keep if surrounded by alphanumeric characters
+* preserve hyphenated tokens only if they match specific technical patterns
+* split all other hyphenated phrases
 
 ```id="hyphen"
 "gpt-4" → ["gpt-4"]
-"state-of-the-art" → ["state-of.the.art"] ❌ (see below)
+"state-of-the-art" → ["state", "of", "the", "art"]
 ```
 
-Clarification:
-
-* DO NOT preserve chained hyphen phrases as one token
-* Instead split:
+Preserved patterns (kept as single token):
 
 ```id="hyphen2"
-"state-of-the-art"
-→ ["state", "of", "the", "art"]
-```
-
-But:
-
-```id="hyphen3"
 "gpt-4" → ["gpt-4"]
 "x86-64" → ["x86-64"]
+"arm64-v8a" → ["arm64-v8a"]
+"es2015" → ["es2015"]
 ```
 
-Heuristic:
+Split patterns (broken into separate tokens):
 
-* preserve if pattern matches:
+```id="hyphen3"
+"state-of-the-art" → ["state", "of", "the", "art"]
+"machine-learning" → ["machine", "learning"]
+"self-driving" → ["self", "driving"]
+```
 
-  * `[a-z0-9]+-[0-9]+`
-  * `[a-z0-9]+-[a-z0-9]+` AND length ≤ 2 segments
+Heuristic (regex-style):
+
+Preserve as single token if:
+
+* `^[a-z]+[0-9]+-[a-z0-9]+$` (e.g., `gpt-4`, `arm64-v8a`)
+* `^[a-z0-9]+-[0-9]+$` (e.g., `python-3`, `v8-10`)
+* `^[a-z]{1,4}[0-9]+-[0-9]+$` (e.g., `x86-64`, `es2015-2020`)
+
+Otherwise split on hyphens.
+
+Rationale:
+
+* Technical identifiers (versions, architectures) should stay intact
+* Natural language hyphenation should split to capture component words
+* Edge cases will exist; consistency matters more than perfection
 
 ---
 
 ### 6.6 URLs
 
-Strip protocol and tokenize domain:
+Detect URLs and extract domain only. Discard path segments.
 
 ```id="url"
-"https://example.com/foo"
-→ ["example.com", "foo"]
+"https://example.com/foo/bar"
+→ ["example.com"]
+
+"Check out github.com/rust-lang/rust"
+→ ["check", "out", "github.com"]
 ```
+
+Rationale:
+
+* Path segments create misleading n-grams (e.g., `foo bar` from `/foo/bar`)
+* Users rarely search for URL path components
+* Domain names are meaningful and searchable
+
+URL detection heuristic:
+
+* Match `https?://[^\s]+`
+* Match `[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)[^\s]*`
+
+Extract only the domain portion. Discard protocol, path, query string, and fragment.
 
 ---
 
@@ -292,7 +318,7 @@ Always discard:
 
 ```id="ex4"
 "Check https://example.com/test"
-→ ["check", "example.com", "test"]
+→ ["check", "example.com"]
 ```
 
 ---
