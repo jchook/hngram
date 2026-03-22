@@ -2,6 +2,14 @@
 //!
 //! Deterministic tokenization for Hacker News comments.
 //! See RFC-001 for specification.
+//!
+//! Also provides n-gram counting and aggregation per RFC-002.
+
+pub mod counter;
+
+pub use counter::{
+    build_vocabulary, BucketKey, DenominatorContribution, NgramCounter, NgramKey, PruningConfig,
+};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
