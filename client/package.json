@@ -1,0 +1,36 @@
+{
+  "name": "hn-ngram-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "rsbuild dev",
+    "build": "rsbuild build",
+    "preview": "rsbuild preview",
+    "generate": "kubb generate",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mantine/core": "^7.11.0",
+    "@mantine/hooks": "^7.11.0",
+    "@tanstack/react-query": "^5.45.0",
+    "echarts": "^5.5.0",
+    "echarts-for-react": "^3.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@kubb/cli": "^3.7.2",
+    "@kubb/core": "^3.7.2",
+    "@kubb/plugin-oas": "^3.7.2",
+    "@kubb/plugin-ts": "^3.7.2",
+    "@kubb/plugin-react-query": "^3.7.2",
+    "@rsbuild/core": "^0.7.0",
+    "@rsbuild/plugin-react": "^0.7.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "postcss": "^8.4.38",
+    "postcss-preset-mantine": "^1.15.0",
+    "typescript": "^5.4.5"
+  }
+}

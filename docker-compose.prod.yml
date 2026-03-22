@@ -1,0 +1,21 @@
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: server/etc/caddy/Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+  api:
+    environment:
+      - RUST_LOG=warn
+
+volumes:
+  caddy_data:
+  caddy_config:

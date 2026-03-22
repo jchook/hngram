@@ -1,0 +1,154 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "HN N-gram API",
+    "description": "API for querying n-gram trends in Hacker News comments",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/query": {
+      "get": {
+        "operationId": "query",
+        "summary": "Query n-gram trends",
+        "parameters": [
+          {
+            "name": "phrases",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated phrases to query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "description": "Start date (YYYY-MM-DD)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "description": "End date (YYYY-MM-DD)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "granularity",
+            "in": "query",
+            "description": "Time granularity: day, week, month, year",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "smoothing",
+            "in": "query",
+            "description": "Smoothing window size",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Query results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status", "version"],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryResponse": {
+        "type": "object",
+        "required": ["series"],
+        "properties": {
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeriesData"
+            }
+          }
+        }
+      },
+      "SeriesData": {
+        "type": "object",
+        "required": ["phrase", "status", "points"],
+        "properties": {
+          "phrase": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PhraseStatus"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DataPoint"
+            }
+          }
+        }
+      },
+      "PhraseStatus": {
+        "type": "string",
+        "enum": ["indexed", "not_indexed", "invalid"]
+      },
+      "DataPoint": {
+        "type": "object",
+        "required": ["t", "value"],
+        "properties": {
+          "t": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}
