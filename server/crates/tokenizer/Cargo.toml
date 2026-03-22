@@ -4,3 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# HTML entity decoding
+html-escape = "0.2"
+
+# Unicode normalization (NFKC)
+unicode-normalization = "0.1"
+
+# Regex for URL detection and hyphen patterns
+regex = "1"
+
+# Lazy static for compiled regexes
+once_cell = "1"
