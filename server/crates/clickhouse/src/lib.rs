@@ -21,6 +21,30 @@ pub const TABLE_NGRAM_COUNTS: &str = "ngram_counts";
 pub const TABLE_BUCKET_TOTALS: &str = "bucket_totals";
 pub const TABLE_NGRAM_VOCABULARY: &str = "ngram_vocabulary";
 
+// ============================================================================
+// API Constants (RFC-005)
+// ============================================================================
+
+/// Default start date for queries: 2011-01-01
+/// This is when HN reached ~1M comments/year, providing meaningful data density.
+pub const HN_DEFAULT_START_DATE: (i32, time::Month, u8) = (2011, time::Month::January, 1);
+
+/// Maximum phrases per query
+pub const MAX_PHRASES: usize = 10;
+
+/// Maximum n-gram order (1, 2, or 3)
+pub const MAX_NGRAM_ORDER: u8 = 3;
+
+/// Create the default start date as a `time::Date`
+pub fn default_start_date() -> Date {
+    Date::from_calendar_date(
+        HN_DEFAULT_START_DATE.0,
+        HN_DEFAULT_START_DATE.1,
+        HN_DEFAULT_START_DATE.2,
+    )
+    .expect("HN_DEFAULT_START_DATE is valid")
+}
+
 #[derive(Error, Debug)]
 pub enum ClickHouseError {
     #[error("ClickHouse error: {0}")]
@@ -452,5 +476,19 @@ mod tests {
         // This allows future migration to semantic versioning if needed
         let version = TOKENIZER_VERSION.to_string();
         assert_eq!(version, "1");
+    }
+
+    #[test]
+    fn default_start_date_is_2011() {
+        let date = default_start_date();
+        assert_eq!(date.year(), 2011);
+        assert_eq!(date.month(), time::Month::January);
+        assert_eq!(date.day(), 1);
+    }
+
+    #[test]
+    fn api_constants() {
+        assert_eq!(MAX_PHRASES, 10);
+        assert_eq!(MAX_NGRAM_ORDER, 3);
     }
 }

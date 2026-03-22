@@ -2,6 +2,13 @@
 
 ## Query API + Type System + OpenAPI/SDK Generation
 
+## Status
+
+**In Progress**
+- Stub implementation: `server/crates/api/src/main.rs`
+- OpenAPI served at: `/api-doc/openapi.json`
+- Swagger UI at: `/swagger-ui`
+
 ---
 
 ## 0. Scope
@@ -67,13 +74,17 @@ Frontend:
 
 * `Kubb` (OpenAPI → TS SDK generator)
 
+Rate Limiting:
+
+* `Caddy` reverse proxy (preferred, keeps API code simple)
+
 ---
 
 ## Rationale
 
 * `utoipa` supports deriving OpenAPI schemas directly from Rust types
 * Kubb generates typed clients, hooks, and validators from OpenAPI
-* combination enables near “define once” workflow
+* Caddy handles rate limiting at infrastructure layer, avoiding Rust middleware complexity
 
 ---
 
@@ -92,60 +103,79 @@ Frontend:
 
 ### Route
 
-```text id="u8b9t2"
+```text
 GET /query
 ```
-
----
 
 ### Query Parameters
 
 Defined via Rust struct (must derive `IntoParams` + `Deserialize`):
 
 ```rust
-struct QueryRequest {
-    phrases: Vec<String>,
-    start: String,        // ISO date (YYYY-MM-DD)
-    end: String,          // ISO date (YYYY-MM-DD)
-    granularity: Granularity,
-    smoothing: Option<u32>,
+#[derive(Deserialize, IntoParams)]
+struct QueryParams {
+    /// Comma-separated phrases to query (max 10)
+    phrases: String,
+    /// Start date (YYYY-MM-DD). Default: HN_DEFAULT_START_DATE
+    start: Option<String>,
+    /// End date (YYYY-MM-DD). Default: today
+    end: Option<String>,
+    /// Time granularity. Default: month
+    granularity: Option<String>,
 }
 ```
 
+Note: `phrases` is a comma-separated string (not array) for clean shareable URLs.
+
 ---
 
-### Enum
+### Granularity Values
 
 ```rust
 enum Granularity {
     Day,
     Week,
-    Month,
+    Month,  // default
     Year,
 }
 ```
+
+Parsed from query string: `day`, `week`, `month`, `year` (case-insensitive).
 
 ---
 
 ## Constraints
 
-* `phrases.len() <= 10`
+* `phrases` splits to max 10 items
 * each phrase must tokenize to 1–3 tokens
-* `start <= end`
-* max date range may be limited (implementation-defined)
+* `start <= end` (if both provided)
+* dates must be valid ISO format (YYYY-MM-DD)
+
+---
+
+## Default Values
+
+| Parameter | Default | Source |
+|-----------|---------|--------|
+| `start` | `2011-01-01` | `hn_clickhouse::HN_DEFAULT_START_DATE` |
+| `end` | today | computed at request time |
+| `granularity` | `month` | `Granularity::default()` |
+
+The default start date (2011) is when HN reached ~1M comments/year, providing meaningful data density.
 
 ---
 
 ## Rationale
 
 * GET allows caching and shareable URLs
-* simple query model matches UI needs
+* comma-separated phrases work cleanly in URLs: `?phrases=rust,go,python`
+* optional params with sensible defaults reduce boilerplate
 
 ---
 
 ## Flexibility
 
-* may switch to POST if URL length becomes problematic
+* may switch to POST if URL length becomes problematic (unlikely with 10 phrase limit)
 * validation rules may be tightened
 
 ---
@@ -155,25 +185,40 @@ enum Granularity {
 ## Spec (mandatory)
 
 ```rust
+#[derive(Serialize, ToSchema)]
 struct QueryResponse {
     series: Vec<Series>,
+    meta: QueryMeta,
 }
 
+#[derive(Serialize, ToSchema)]
+struct QueryMeta {
+    tokenizer_version: String,
+    start: String,
+    end: String,
+    granularity: String,
+}
+
+#[derive(Serialize, ToSchema)]
 struct Series {
     phrase: String,
+    normalized: String,  // tokenized form used for lookup
     status: SeriesStatus,
     points: Vec<Point>,
 }
 
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 enum SeriesStatus {
     Indexed,      // phrase is in vocabulary, data returned
-    NotIndexed,   // phrase is NOT in vocabulary (too rare historically)
-    Invalid,      // phrase failed validation (e.g., > 3 tokens)
+    NotIndexed,   // phrase is valid but not in vocabulary (too rare)
+    Invalid,      // phrase failed validation (e.g., > 3 tokens, empty)
 }
 
+#[derive(Serialize, ToSchema)]
 struct Point {
-    t: String,     // bucket timestamp (ISO)
-    value: f64,    // relative frequency
+    t: String,     // bucket timestamp (YYYY-MM-DD)
+    v: f64,        // relative frequency
 }
 ```
 
@@ -182,25 +227,27 @@ struct Point {
 ## Requirements
 
 * output sorted by time ascending
-* one series per input phrase
-* for `Indexed` series: missing buckets must be filled (value = 0.0)
+* one series per input phrase (in input order)
+* for `Indexed` series: ALL buckets in range must be present (zero-fill gaps)
 * for `NotIndexed` series: points array is empty
 * for `Invalid` series: points array is empty
+* `meta` includes actual parameters used (after defaults applied)
 
 ---
 
 ## Rationale
 
 * stable structure for frontend charting
-* avoids frontend needing to normalize missing data
-* status field enables frontend to distinguish "legitimately zero" from "not tracked"
+* zero-filling avoids frontend needing to normalize missing data
+* `normalized` field shows what was actually looked up (aids debugging)
+* `meta` enables reproducible queries and debugging
 
 ---
 
 ## Flexibility
 
-* timestamp format may be changed to integer if needed
 * additional metadata fields may be added
+* field names use short forms (`t`, `v`) to reduce payload size
 
 ---
 
@@ -212,18 +259,27 @@ For each input phrase:
 
 1. apply RFC-001 tokenizer
 2. count tokens
-3. reject if token count ∉ {1,2,3}
-4. join tokens with single space
-5. use resulting string as lookup key
+3. if token count = 0 → status = `Invalid`
+4. if token count > 3 → status = `Invalid`
+5. join tokens with single space
+6. use resulting string as lookup key
 
 ---
 
 ## Example
 
-```text id="7wrn6k"
+```text
 Input: "Node.js"
-→ ["node.js"]
-→ "node.js"
+→ tokenize → ["node.js"]
+→ join → "node.js"
+→ lookup in ClickHouse
+```
+
+```text
+Input: "this is a very long phrase"
+→ tokenize → ["this", "is", "a", "very", "long", "phrase"]
+→ count = 6 > 3
+→ status = Invalid
 ```
 
 ---
@@ -236,36 +292,54 @@ Input: "Node.js"
 
 ## Constraints
 
-* must use same tokenizer version as ingestion
+* must use same tokenizer version as ingestion (from `hn_clickhouse::TOKENIZER_VERSION`)
 
 ---
 
-## Flexibility
-
-* none (must remain identical to ingestion logic)
-
----
-
-# 6. Missing Data Handling
+# 6. Zero-Fill Algorithm
 
 ## Spec (mandatory)
 
-If no rows exist for `(bucket, ngram)`:
+For `Indexed` series, backend must return a point for every bucket in the requested range:
 
-* return value = 0.0
+```rust
+fn zero_fill(
+    data: HashMap<Date, f64>,
+    start: Date,
+    end: Date,
+    granularity: Granularity,
+) -> Vec<Point> {
+    let mut result = vec![];
+    let mut current = align_to_granularity(start, granularity);
+
+    while current <= end {
+        let value = data.get(&current).copied().unwrap_or(0.0);
+        result.push(Point { t: current.to_string(), v: value });
+        current = next_bucket(current, granularity);
+    }
+
+    result
+}
+```
+
+---
+
+## Bucket alignment
+
+| Granularity | Alignment function |
+|-------------|-------------------|
+| Day | identity |
+| Week | `toStartOfWeek` (Monday) |
+| Month | `toStartOfMonth` |
+| Year | `toStartOfYear` |
 
 ---
 
 ## Rationale
 
-* ensures continuous time series
-* simplifies frontend logic
-
----
-
-## Flexibility
-
-* agent may perform zero-fill in backend or frontend
+* ensures continuous time series for charting
+* frontend receives ready-to-plot data
+* no client-side date math required
 
 ---
 
@@ -274,15 +348,15 @@ If no rows exist for `(bucket, ngram)`:
 ## Spec
 
 * base storage: daily
-* derived via SQL aggregation
+* derived via SQL aggregation (RFC-003 Section 8)
 
 Mapping:
 
-```text id="aq8y3c"
-Day   → raw bucket
-Week  → toStartOfWeek
-Month → toStartOfMonth
-Year  → toStartOfYear
+```text
+Day   → raw bucket (no aggregation)
+Week  → toStartOfWeek + GROUP BY
+Month → toStartOfMonth + GROUP BY
+Year  → toStartOfYear + GROUP BY
 ```
 
 ---
@@ -290,22 +364,17 @@ Year  → toStartOfYear
 ## Rationale
 
 * avoids storing redundant aggregates
-
----
-
-## Flexibility
-
-* may precompute aggregates if performance requires
+* `hn-clickhouse` crate provides both `query_ngrams` (daily) and `query_ngrams_aggregated` (other)
 
 ---
 
 # 8. Smoothing
 
-## Spec (recommended)
+## Spec (mandatory)
 
-* smoothing should be applied **frontend-side**
+* smoothing is **frontend-only**
 * API returns raw (unsmoothed) series data
-* frontend applies simple moving average in memoized transform
+* no `smoothing` parameter in API
 
 ---
 
@@ -318,51 +387,86 @@ Year  → toStartOfYear
 
 ---
 
-## Implementation
-
-Frontend applies smoothing via:
+## Frontend Implementation
 
 ```typescript
 function applySmoothing(points: Point[], window: number): Point[] {
-  // simple moving average over `window` buckets
+  if (window <= 1) return points;
+  return points.map((point, i) => {
+    const start = Math.max(0, i - Math.floor(window / 2));
+    const end = Math.min(points.length, i + Math.ceil(window / 2));
+    const slice = points.slice(start, end);
+    const avg = slice.reduce((sum, p) => sum + p.v, 0) / slice.length;
+    return { t: point.t, v: avg };
+  });
 }
 ```
 
-Memoize this transform based on `(points, window)`.
-
 ---
 
-## Flexibility
-
-* backend-side smoothing is allowed if there is a compelling reason
-* if implemented backend-side, `smoothing` becomes part of query key (affects caching)
-
----
-
-# 9. OpenAPI Generation
+# 9. Error Handling
 
 ## Spec (mandatory)
 
-* all request/response types must derive:
+API must return structured errors:
 
-  * `ToSchema`
+```rust
+#[derive(Serialize, ToSchema)]
+struct ErrorResponse {
+    error: ErrorDetail,
+}
 
-* all endpoints must use:
-
-  * `#[utoipa::path(...)]`
-
-* OpenAPI spec must be exposed at:
-
-```text id="j4o4js"
-/openapi.json
+#[derive(Serialize, ToSchema)]
+struct ErrorDetail {
+    code: String,
+    message: String,
+}
 ```
+
+---
+
+## Error Codes
+
+| Code | HTTP Status | Condition |
+|------|-------------|-----------|
+| `MISSING_PHRASES` | 400 | `phrases` param empty or missing |
+| `TOO_MANY_PHRASES` | 400 | more than 10 phrases |
+| `INVALID_PHRASE` | 400 | phrase tokenizes to 0 or >3 tokens |
+| `INVALID_DATE_FORMAT` | 400 | date not in YYYY-MM-DD format |
+| `INVALID_DATE_RANGE` | 400 | start > end |
+| `INVALID_GRANULARITY` | 400 | unknown granularity value |
+| `INTERNAL_ERROR` | 500 | ClickHouse or other internal failure |
+
+---
+
+## Example
+
+```json
+{
+  "error": {
+    "code": "TOO_MANY_PHRASES",
+    "message": "Maximum 10 phrases allowed, got 15"
+  }
+}
+```
+
+---
+
+# 10. OpenAPI Generation
+
+## Spec (mandatory)
+
+* all request/response types must derive `ToSchema`
+* all endpoints must use `#[utoipa::path(...)]`
+* OpenAPI spec served at: `/api-doc/openapi.json`
+* Swagger UI served at: `/swagger-ui`
 
 ---
 
 ## Rationale
 
 * enables automatic SDK generation
-* keeps schema centralized
+* Swagger UI aids development and debugging
 
 ---
 
@@ -373,18 +477,13 @@ Memoize this transform based on `(points, window)`.
 
 ---
 
-## Flexibility
-
-* spec may also be exported as static file
-
----
-
-# 10. TypeScript SDK Generation
+# 11. TypeScript SDK Generation
 
 ## Spec (mandatory)
 
 * frontend must generate SDK using Kubb
 * OpenAPI spec is the only input
+* generated code goes to `client/src/gen/` (gitignored)
 
 ---
 
@@ -392,13 +491,7 @@ Memoize this transform based on `(points, window)`.
 
 * typed client functions
 * request/response types
-* optional React hooks
-
----
-
-## Rationale
-
-* ensures frontend/backend type consistency
+* React Query hooks (optional)
 
 ---
 
@@ -409,91 +502,46 @@ Memoize this transform based on `(points, window)`.
 
 ---
 
-## Flexibility
-
-* generation strategy (hooks vs plain client) may vary
-
----
-
-# 11. Error Handling
-
-## Spec
-
-API must return structured errors:
-
-```json id="hpfvge"
-{
-  "error": {
-    "code": "INVALID_QUERY",
-    "message": "Phrase must tokenize to 1-3 tokens"
-  }
-}
-```
-
----
-
-## Rationale
-
-* predictable error handling for frontend
-
----
-
-## Flexibility
-
-* error codes may expand
-
----
-
 # 12. Rate Limiting
 
 ## Spec (mandatory)
 
-API must implement basic rate limiting to prevent abuse.
+Rate limiting handled by Caddy reverse proxy (not Rust middleware).
 
-### Recommended limits
-
-* **per-IP**: 60 requests/minute
-* **burst**: 10 requests/second
-
-### Implementation options
-
-1. **Caddy rate_limit directive** (preferred for simplicity)
+### Caddyfile configuration
 
 ```caddyfile
-rate_limit {
-  zone api {
-    key {remote_host}
-    events 60
-    window 1m
-  }
+api.example.com {
+    rate_limit {
+        zone api {
+            key {remote_host}
+            events 60
+            window 1m
+        }
+    }
+
+    reverse_proxy api:3000
 }
 ```
 
-2. **Rust middleware** (tower-governor or similar)
+### Limits
 
-```rust
-use tower_governor::{GovernorLayer, GovernorConfigBuilder};
-
-let config = GovernorConfigBuilder::default()
-    .per_second(10)
-    .burst_size(60)
-    .finish()
-    .unwrap();
-```
+* **per-IP**: 60 requests/minute
+* **burst**: handled by zone configuration
 
 ---
 
 ## Rationale
 
-* public API without rate limiting is vulnerable to abuse
-* even accidental client bugs can cause excessive load
-* small VPS has limited resources
+* keeps API code simple
+* Caddy handles this efficiently at edge
+* easy to tune without code changes
 
 ---
 
 ## Flexibility
 
-* exact limits may be tuned based on observed traffic
+* limits may be tuned based on observed traffic
 * may add per-route limits if needed
 
 ---
@@ -502,9 +550,8 @@ let config = GovernorConfigBuilder::default()
 
 ## Spec
 
-* API must include:
-
-  * `tokenizer_version` internally
+* API uses `tokenizer_version` from `hn_clickhouse::TOKENIZER_VERSION`
+* version included in response `meta` for transparency
 * frontend does not supply version
 
 ---
@@ -512,16 +559,40 @@ let config = GovernorConfigBuilder::default()
 ## Rationale
 
 * ensures query consistency with stored data
+* meta field aids debugging version mismatches
 
 ---
 
-## Flexibility
+# 14. Constants
 
-* future support for multiple versions allowed
+## Spec (mandatory)
+
+Shared constants must be defined in `hn-clickhouse` crate:
+
+```rust
+/// Default start date for queries (when HN had meaningful volume)
+pub const HN_DEFAULT_START_DATE: (i32, u8, u8) = (2011, 1, 1);
+
+/// Maximum phrases per query
+pub const MAX_PHRASES: usize = 10;
+
+/// Maximum n-gram order
+pub const MAX_NGRAM_ORDER: u8 = 3;
+```
+
+API crate imports these constants - no hardcoded values.
 
 ---
 
-# 14. Prohibited Designs
+## Rationale
+
+* single source of truth
+* easy to adjust limits
+* prevents drift between validation and documentation
+
+---
+
+# 15. Prohibited Designs
 
 Agent must NOT:
 
@@ -530,18 +601,37 @@ Agent must NOT:
 * use stringly-typed JSON responses
 * allow queries without normalization
 * expose raw DB schema directly
+* hardcode limits/defaults in multiple places
+* add smoothing to API
 
 ---
 
-# 15. Acceptance Criteria
+# 16. Acceptance Criteria
 
 System is valid if:
 
 * frontend SDK compiles without manual edits
 * all API types originate from Rust
 * queries return correct normalized results
+* zero-fill produces continuous time series
 * no type mismatch between backend and frontend
 * OpenAPI spec fully describes API
+* error responses follow defined schema
+
+---
+
+## Implementation Checklist
+
+- [ ] `hn-clickhouse`: Add `HN_DEFAULT_START_DATE`, `MAX_PHRASES`, `MAX_NGRAM_ORDER` constants
+- [ ] `api`: Import constants from `hn-clickhouse`
+- [ ] `api`: Implement proper error response types
+- [ ] `api`: Implement zero-fill for indexed series
+- [ ] `api`: Add `meta` to response
+- [ ] `api`: Add `normalized` field to series
+- [ ] `api`: Validate all constraints (phrase count, date range, etc.)
+- [ ] `api`: Remove smoothing parameter
+- [ ] Export OpenAPI spec to `server/openapi.json`
+- [ ] Caddy config with rate limiting
 
 ---
 
@@ -549,7 +639,7 @@ System is valid if:
 
 If proposing changes:
 
-* must preserve “Rust → OpenAPI → TS” pipeline
+* must preserve "Rust → OpenAPI → TS" pipeline
 * must not introduce duplicated type definitions
 * must maintain strict alignment with tokenizer and n-gram rules
-
+* must use constants from `hn-clickhouse`, not hardcoded values
