@@ -29,12 +29,12 @@
         }
       }
     },
-    "/query": {
+    "/ngram": {
       "get": {
         "tags": [
           "crate"
         ],
-        "operationId": "query",
+        "operationId": "ngram",
         "parameters": [
           {
             "name": "phrase",

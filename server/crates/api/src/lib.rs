@@ -24,7 +24,7 @@ pub use utoipa::{IntoParams, OpenApi, ToSchema};
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, query),
+    paths(health, ngram),
     components(schemas(
         HealthResponse,
         QueryParams,
@@ -53,7 +53,7 @@ pub struct AppState {
 pub fn api_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/query", get(query))
+        .route("/ngram", get(ngram))
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
                 .url("/api-doc/openapi.json", ApiDoc::openapi()),
@@ -201,14 +201,14 @@ fn ngram_order(tokens: &[String]) -> Option<u8> {
 
 #[utoipa::path(
     get,
-    path = "/query",
+    path = "/ngram",
     params(QueryParams),
     responses(
         (status = 200, description = "Query result for a single phrase", body = QueryResponse),
         (status = 400, description = "Invalid query parameters", body = ErrorResponse)
     )
 )]
-pub async fn query(
+pub async fn ngram(
     State(state): State<Arc<AppState>>,
     Query(params): Query<QueryParams>,
 ) -> impl IntoResponse {

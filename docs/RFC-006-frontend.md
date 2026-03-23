@@ -1108,8 +1108,7 @@ When making implementation choices:
 
 Prefer:
 
-* fewer files
-* fewer abstractions
+* clear separation of concerns — each file should have one reason to change
 * explicit data flow
 * generated API integration
 * one chart, one page, one query model
@@ -1120,6 +1119,7 @@ Avoid:
 * generalized state machinery
 * custom chart infrastructure
 * overengineering for future hypothetical features
+* collapsing distinct concerns into one file just to reduce file count
 
-The frontend should feel like a thin, reliable shell over a typed API and a single time-series chart.
+The goal is **maintainability**, not minimalism. A 15-line wrapper component is fine if it represents a real boundary (e.g. chart library integration). Don't add abstractions for hypothetical growth, but don't avoid them when they clarify responsibility.
 
