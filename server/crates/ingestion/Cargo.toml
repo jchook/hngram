@@ -4,11 +4,35 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Internal crates
 tokenizer.workspace = true
 hn-clickhouse.workspace = true
+
+# Async runtime
 tokio.workspace = true
+
+# Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
-anyhow.workspace = true
+
+# Error handling
 serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+# Date/time (matching hn-clickhouse, NOT chrono)
 time = { version = "0.3", features = ["macros", "parsing", "formatting"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Parquet / Arrow
+parquet = { version = "53", default-features = false, features = ["arrow", "zstd"] }
+arrow = { version = "53", default-features = false }
+
+# HTTP downloads
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+
+# Parallelism
+rayon = "1"

@@ -101,25 +101,26 @@ pub struct NgramVocabularyRow {
 // Query Result Types
 // ============================================================================
 
-/// Result from the main n-gram query (RFC-003 Section 7, RFC-007-optimizations §2)
-/// Returns raw counts only — no JOIN with bucket_totals.
-/// Client computes relative frequency using separate /totals endpoint.
+/// Result from the daily n-gram query (RFC-003 Section 7)
+/// Includes count and total_count for frequency computation.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct NgramQueryResult {
     #[serde(with = "clickhouse::serde::time::date")]
     pub bucket: Date,
     pub ngram: String,
     pub count: u32,
+    pub total_count: u64,
 }
 
-/// Aggregated result with derived granularity (RFC-003 Section 8, RFC-007-optimizations §2)
-/// Returns summed raw counts only — no JOIN with bucket_totals.
+/// Aggregated result with derived granularity (RFC-003 Section 8)
+/// Includes summed counts and totals for frequency computation.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct AggregatedQueryResult {
     #[serde(with = "clickhouse::serde::time::date")]
     pub bucket: Date,
     pub ngram: String,
     pub sum_count: u64,
+    pub sum_total: u64,
 }
 
 /// Result from batch vocabulary check
@@ -243,10 +244,7 @@ impl HnClickHouse {
     // Query Operations (for API)
     // ========================================================================
 
-    /// Query raw n-gram counts (RFC-003 Section 7, RFC-007-optimizations §2)
-    ///
-    /// Returns raw counts only — no JOIN with bucket_totals.
-    /// Client computes relative frequency using separate /totals endpoint.
+    /// Query daily n-gram counts with totals (RFC-003 Section 7)
     pub async fn query_ngrams(
         &self,
         n: u8,
@@ -264,16 +262,21 @@ impl HnClickHouse {
         let query = format!(
             r#"
             SELECT
-                bucket,
-                ngram,
-                count
-            FROM {TABLE_NGRAM_COUNTS}
+                c.bucket,
+                c.ngram,
+                c.count,
+                t.total_count
+            FROM {TABLE_NGRAM_COUNTS} c
+            JOIN {TABLE_BUCKET_TOTALS} t
+                ON c.bucket = t.bucket
+               AND c.n = t.n
+               AND c.tokenizer_version = t.tokenizer_version
             WHERE
-                tokenizer_version = ?
-                AND n = ?
-                AND ngram IN ?
-                AND bucket BETWEEN ? AND ?
-            ORDER BY bucket
+                c.tokenizer_version = ?
+                AND c.n = ?
+                AND c.ngram IN ?
+                AND c.bucket BETWEEN ? AND ?
+            ORDER BY c.bucket
             "#
         );
 
@@ -291,8 +294,7 @@ impl HnClickHouse {
         Ok(results)
     }
 
-    /// Query with aggregation to week/month/year (RFC-003 Section 8, RFC-007-optimizations §2)
-    /// Returns summed raw counts only — no JOIN with bucket_totals.
+    /// Query with aggregation to week/month/year (RFC-003 Section 8)
     pub async fn query_ngrams_aggregated(
         &self,
         n: u8,
@@ -309,25 +311,30 @@ impl HnClickHouse {
         }
 
         let bucket_fn = match granularity {
-            Granularity::Day => "toDate(bucket)",
-            Granularity::Week => "toStartOfWeek(bucket)",
-            Granularity::Month => "toStartOfMonth(bucket)",
-            Granularity::Year => "toStartOfYear(bucket)",
+            Granularity::Day => "toDate(c.bucket)",
+            Granularity::Week => "toStartOfWeek(c.bucket)",
+            Granularity::Month => "toStartOfMonth(c.bucket)",
+            Granularity::Year => "toStartOfYear(c.bucket)",
         };
 
         let query = format!(
             r#"
             SELECT
                 {bucket_fn} AS bucket,
-                ngram,
-                sum(count) AS sum_count
-            FROM {TABLE_NGRAM_COUNTS}
+                c.ngram,
+                sum(c.count) AS sum_count,
+                sum(t.total_count) AS sum_total
+            FROM {TABLE_NGRAM_COUNTS} c
+            JOIN {TABLE_BUCKET_TOTALS} t
+                ON c.bucket = t.bucket
+               AND c.n = t.n
+               AND c.tokenizer_version = t.tokenizer_version
             WHERE
-                tokenizer_version = ?
-                AND n = ?
-                AND ngram IN ?
-                AND bucket BETWEEN ? AND ?
-            GROUP BY bucket, ngram
+                c.tokenizer_version = ?
+                AND c.n = ?
+                AND c.ngram IN ?
+                AND c.bucket BETWEEN ? AND ?
+            GROUP BY bucket, c.ngram
             ORDER BY bucket
             "#
         );
@@ -341,42 +348,6 @@ impl HnClickHouse {
             .bind(start)
             .bind(end)
             .fetch_all::<AggregatedQueryResult>()
-            .await?;
-
-        Ok(results)
-    }
-
-    /// Query bucket totals for a date range (RFC-007-optimizations §2)
-    ///
-    /// Returns daily total_count for each n-gram order within the range.
-    /// This data changes only on ingestion and is designed to be cached aggressively.
-    pub async fn query_bucket_totals(
-        &self,
-        start: Date,
-        end: Date,
-    ) -> Result<Vec<BucketTotalRow>> {
-        let query = format!(
-            r#"
-            SELECT
-                tokenizer_version,
-                n,
-                bucket,
-                total_count
-            FROM {TABLE_BUCKET_TOTALS}
-            WHERE
-                tokenizer_version = ?
-                AND bucket BETWEEN ? AND ?
-            ORDER BY n, bucket
-            "#
-        );
-
-        let results = self
-            .client
-            .query(&query)
-            .bind(&self.tokenizer_version)
-            .bind(start)
-            .bind(end)
-            .fetch_all::<BucketTotalRow>()
             .await?;
 
         Ok(results)

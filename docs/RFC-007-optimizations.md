@@ -7,11 +7,12 @@
 ## Checklist
 
 - [x] 1. HTTP response caching (Caddy layer)
-- [x] 2. Separate `/totals` endpoint with aggressive caching
-- [x] 3. Client-side granularity aggregation (always return daily data)
-- [x] 4. Client-side relative frequency computation
+- [ ] 2. ~~Separate `/totals` endpoint with aggressive caching~~ — Superseded by per-phrase caching strategy
+- [ ] 3. ~~Client-side granularity aggregation (always return daily data)~~ — Superseded by per-phrase caching strategy
+- [ ] 4. ~~Client-side relative frequency computation~~ — Superseded by per-phrase caching strategy
 - [ ] 5. Pre-computed monthly materialized view (alternative to #3)
 - [ ] 6. Client-side vocabulary status inference
+- [x] 7. Per-phrase caching strategy (replaces items 2-4)
 
 ---
 
@@ -20,9 +21,8 @@
 Define optimizations that reduce server-side work per query by:
 
 * leveraging HTTP caching at the reverse proxy layer
-* splitting infrequently-changing data into separately cacheable endpoints
-* moving cheap arithmetic (frequency computation, granularity aggregation) to the client
-* eliminating JOINs and GROUP BYs from the hot query path
+* per-phrase API design for independent caching of each phrase × granularity × date range
+* maximizing cache hit rates across users and searches
 
 Assumes:
 
@@ -35,22 +35,23 @@ Assumes:
 
 ## 0.1 Design Principle
 
-The client already performs zero-fill and smoothing (RFC-005 §8, RFC-006 §12). The optimizations here extend that philosophy: the API becomes a thin lookup layer over ClickHouse, and the client handles all data shaping.
+The primary optimization strategy is **per-phrase caching**: the API accepts a single phrase per request, enabling independent HTTP caching per phrase × granularity × date range. The client makes parallel requests and handles zero-fill and smoothing.
 
 ---
 
 ## 0.2 Priority
 
-| # | Change | Server savings | Client cost | Complexity |
-|---|--------|---------------|-------------|------------|
-| 1 | HTTP caching | High (eliminates repeated queries) | None | Low |
-| 2 | Separate totals endpoint | Medium (removes JOIN) | Trivial division | Low |
-| 3 | Client-side granularity | Medium (removes GROUP BY, better caching) | Simple aggregation | Low |
-| 4 | Client-side frequency math | Medium (pairs with #2) | Trivial division | Low |
-| 5 | Materialized monthly view | Medium (if keeping server aggregation) | None | Low |
-| 6 | Client vocabulary inference | Low | Infer from response | Low |
+| # | Change | Server savings | Client cost | Complexity | Status |
+|---|--------|---------------|-------------|------------|--------|
+| 1 | HTTP caching | High (eliminates repeated queries) | None | Low | Active |
+| 2 | ~~Separate totals endpoint~~ | — | — | — | Superseded |
+| 3 | ~~Client-side granularity~~ | — | — | — | Superseded |
+| 4 | ~~Client-side frequency math~~ | — | — | — | Superseded |
+| 5 | Materialized monthly view | Medium (if monthly queries are hot) | None | Low | Deferred |
+| 6 | Client vocabulary inference | Low | Infer from response | Low | Deferred |
+| 7 | Per-phrase caching | High (independent cache per phrase) | Parallel requests | Low | Active |
 
-Items 1-4 are recommended together. Item 5 is an alternative to #3 (pick one). Item 6 is independent.
+Items 2-4 were superseded by item 7 (per-phrase caching strategy). Item 5 is independent. Item 6 is independent.
 
 ---
 
@@ -69,7 +70,7 @@ ETag: "<last-ingestion-timestamp>"
 
 ### Caddy cache configuration
 
-Enable response caching for `/query` and `/totals` endpoints. Repeated queries for the same parameters are served from cache with zero ClickHouse work.
+Enable response caching for `/query` endpoint. Repeated queries for the same phrase × granularity × date range are served from cache with zero ClickHouse work. Per-phrase API design maximizes cache hit rates — popular phrases are cached independently and reused across different user searches.
 
 ### Cache invalidation
 
@@ -97,227 +98,25 @@ On ingestion completion:
 
 # 2. Separate Totals Endpoint
 
-## Spec
+## Status: Superseded
 
-### Current design (RFC-003 §7)
-
-Every `/query` request JOINs `ngram_counts` with `bucket_totals`:
-
-```sql
-SELECT c.bucket, c.ngram, c.count / t.total_count AS rel_freq
-FROM ngram_counts c
-JOIN bucket_totals t ON ...
-```
-
-### Proposed design
-
-Split into two endpoints:
-
-```text
-GET /query?phrases=rust,go&start=2015-01-01&end=2025-01-01
-  Returns: raw daily counts (sparse), status per phrase
-  No JOIN, no frequency computation
-
-GET /totals?start=2015-01-01&end=2025-01-01
-  Returns: daily total_count for n=1,2,3
-  Heavily cached (changes only on ingestion)
-```
-
-### `/totals` response schema
-
-```rust
-#[derive(Serialize, ToSchema)]
-struct TotalsResponse {
-    /// Keyed by n (1, 2, 3), each containing sparse daily totals
-    totals: HashMap<u8, Vec<TotalPoint>>,
-    meta: TotalsMeta,
-}
-
-#[derive(Serialize, ToSchema)]
-struct TotalPoint {
-    t: String,      // YYYY-MM-DD
-    v: u64,         // total_count for that day
-}
-
-#[derive(Serialize, ToSchema)]
-struct TotalsMeta {
-    tokenizer_version: String,
-    start: String,
-    end: String,
-}
-```
-
-### `/query` response change
-
-The `Point.v` field becomes a raw count (`u32`) instead of a relative frequency (`f64`):
-
-```rust
-struct Point {
-    t: String,     // bucket timestamp (YYYY-MM-DD)
-    v: u32,        // raw occurrence count (not relative frequency)
-}
-```
-
-### Client computation
-
-```typescript
-const relativeFrequency = count / totalForThatDayAndN;
-```
-
----
-
-## Rationale
-
-* eliminates a JOIN on every query
-* totals are small (~5,400 days × 3 n-orders = ~16K rows) and change only on ingestion
-* totals can be cached for hours or days with `Cache-Control: public, max-age=86400`
-* main query becomes a pure indexed key lookup in ClickHouse
-
----
-
-## Flexibility
-
-* totals endpoint may return data for all n-orders, or accept an `n` filter param
-* client may fetch totals once on page load and reuse across queries
-
----
-
-## Constraints
-
-* client must fetch totals for the correct date range before computing frequencies
-* if totals are missing for a bucket (should not happen), client treats frequency as 0
+Superseded — per-phrase caching provides better cache hit rates than separating totals. With the per-phrase API design (one request per phrase), the JOIN with `bucket_totals` is trivial (single phrase lookup) and does not warrant a separate endpoint. See §7 for the replacement strategy.
 
 ---
 
 # 3. Client-Side Granularity Aggregation
 
-## Spec
+## Status: Superseded
 
-### Current design (RFC-003 §8, RFC-005 §7)
-
-Server applies ClickHouse aggregation functions for non-daily granularity:
-
-```sql
-SELECT toStartOfMonth(c.bucket) AS bucket, c.ngram,
-       sum(c.count) / sum(t.total_count) AS rel_freq
-FROM ...
-GROUP BY bucket, c.ngram
-```
-
-### Proposed design
-
-API always returns daily data. The `granularity` parameter is removed from the API and becomes frontend-only (like smoothing).
-
-Client aggregates daily data to the requested granularity:
-
-```typescript
-function aggregateToGranularity(
-  dailyCounts: Point[],
-  dailyTotals: TotalPoint[],
-  granularity: 'day' | 'week' | 'month' | 'year'
-): Point[] {
-  if (granularity === 'day') {
-    return dailyCounts.map(c => ({
-      t: c.t,
-      v: c.v / getTotalForDay(dailyTotals, c.t)
-    }));
-  }
-  // Group daily counts/totals by period, sum each, divide
-  const periods = groupByPeriod(dailyCounts, granularity);
-  const totalPeriods = groupByPeriod(dailyTotals, granularity);
-  return periods.map(p => ({
-    t: p.periodStart,
-    v: p.sumCounts / totalPeriods.get(p.periodStart)
-  }));
-}
-```
-
-### URL state change
-
-The `g` URL param remains (for shareability) but is no longer sent to the API. It joins `s` (smoothing) as a frontend-only display parameter.
-
----
-
-## Rationale
-
-* eliminates server-side GROUP BY
-* one cache key per (phrases, date range) regardless of granularity
-* switching granularity is instant with no network round-trip (same as smoothing slider)
-* daily data for 15 years is ~5,400 points per series; at ~20 bytes each = ~100KB per series, ~200-300KB gzipped for 10 series — acceptable
-
----
-
-## Tradeoffs
-
-* slightly larger payloads vs. the current design where monthly data is ~180 points per series
-* negligible client-side compute cost for summing arrays
-
----
-
-## Flexibility
-
-* if payload size becomes a concern, may add optional server-side pre-aggregation for year granularity only
-* may compress further with binary response format in future
+Superseded — granularity stays server-side to reduce payload size (30x for monthly vs daily). Per-phrase caching compensates for the additional cache keys. With the per-phrase API design, each phrase × granularity × date range is independently cached, so the cache key multiplication from granularity is offset by the cache key reduction from single-phrase requests. See §7 for the replacement strategy.
 
 ---
 
 # 4. Client-Side Relative Frequency Computation
 
-## Spec
+## Status: Superseded
 
-This is the direct consequence of #2 + #3 combined.
-
-### Transform pipeline (updated from RFC-006 §12)
-
-```text
-Current:  API response (sparse frequencies) → zero-fill → smooth → chart
-Proposed: API response (sparse raw counts)
-            + cached totals
-            → zero-fill counts
-            → aggregate to granularity (sum counts, sum totals per period)
-            → compute relative frequency (count / total)
-            → smooth
-            → chart format
-```
-
-### Client module
-
-```typescript
-// features/chart/transform.ts
-
-function transformSeries(
-  rawCounts: Point[],          // sparse daily counts from /query
-  dailyTotals: TotalPoint[],   // from /totals (cached)
-  start: string,
-  end: string,
-  granularity: Granularity,
-  smoothingWindow: number
-): ChartPoint[] {
-  const filled = zeroFillCounts(rawCounts, start, end);           // daily
-  const aggregated = aggregateToGranularity(filled, dailyTotals, granularity);
-  const frequencies = computeRelativeFrequency(aggregated);
-  return applySmoothing(frequencies, smoothingWindow);
-}
-```
-
-### Memoization
-
-Each step should be independently memoizable:
-
-* `zeroFillCounts` — recomputes only when raw data or date range changes
-* `aggregateToGranularity` — recomputes only when granularity changes
-* `computeRelativeFrequency` — recomputes only when aggregation changes
-* `applySmoothing` — recomputes only when smoothing window changes
-
-Changing granularity or smoothing reuses cached API data — no network request.
-
----
-
-## Rationale
-
-* all transforms are simple array arithmetic, trivial in JS
-* matches the existing design philosophy: API is a "dumb pipe", client does presentation logic
-* granularity and smoothing changes become equally instant
+Superseded — server computes frequency. Per-phrase API design means the JOIN is trivial (single phrase lookup). The server JOINs `ngram_counts` with `bucket_totals` and returns relative frequency (`f64`) directly. See §7 for the replacement strategy.
 
 ---
 
@@ -410,35 +209,53 @@ Generate a compact bloom filter of the admitted vocabulary at ingestion time. Se
 
 ---
 
-# 7. Combined "Dumb Pipe" API Design
+# 7. Per-Phrase Caching Strategy (Replaces Items 2-4)
 
-## Spec (recommended target state after items 1-4)
+## Spec (mandatory — current API design)
 
-If items 1-4 are all implemented, the API simplifies to:
+The API accepts a **single phrase** per request. Clients make parallel requests (one per phrase, up to 10). This is the primary caching optimization, replacing items 2-4.
 
 ```text
-GET /counts?phrases=rust,go&start=2015-01-01&end=2025-01-01
-  → sparse daily raw counts + status per phrase
-  → pure indexed ClickHouse lookup, no JOIN, no GROUP BY
-
-GET /totals?start=2015-01-01&end=2025-01-01
-  → daily totals for n=1,2,3
-  → heavily cached, changes only on ingestion
+GET /query?phrase=rust&start=2015-01-01&end=2025-01-01&granularity=month
+  → sparse relative frequencies for one phrase
+  → server JOINs ngram_counts with bucket_totals, applies GROUP BY for granularity
+  → independently cached per phrase × granularity × date range
 ```
 
-**Server does:** key lookup in ClickHouse, serialize response, set cache headers.
+**Server does:** key lookup + JOIN with bucket_totals in ClickHouse, GROUP BY for granularity, serialize response, set cache headers.
 
-**Client does:** zero-fill, frequency computation, granularity aggregation, smoothing.
+**Client does:** parallel requests (one per phrase), zero-fill, smoothing, ECharts formatting.
 
-### What changes from RFC-005
+### Why this replaces items 2-4
 
-| Concern | RFC-005 (current) | After optimization |
-|---------|-------------------|-------------------|
-| Relative frequency | Server computes via JOIN | Client computes from raw counts + totals |
-| Granularity aggregation | Server GROUP BY | Client aggregation |
-| `granularity` API param | Sent to server | Frontend-only (like `smoothing`) |
-| Response `Point.v` | `f64` (frequency) | `u32` (raw count) |
-| Totals | Embedded in JOIN | Separate cached endpoint |
+| Original optimization | Why superseded |
+|----------------------|----------------|
+| Separate `/totals` endpoint (#2) | Single-phrase JOIN is trivial; no need to avoid it |
+| Client-side granularity (#3) | Server aggregation reduces payload 30x (monthly vs daily); per-phrase caching compensates for extra cache keys |
+| Client-side frequency (#4) | Server computes frequency; JOIN cost is negligible for single phrase |
+
+### Cache hit rate analysis
+
+With multi-phrase API (`?phrases=rust,go,python`):
+* cache key = `(rust,go,python, month, 2015-2025)` — very specific, low reuse
+* adding `java` to the search = entirely new cache key, no reuse
+
+With per-phrase API (`?phrase=rust`):
+* cache key = `(rust, month, 2015-2025)` — high reuse across different searches
+* adding `java` = one new request, three cached hits
+* popular phrases like `rust`, `python`, `ai` are cached across all users
+
+### What the final API looks like
+
+| Concern | Design |
+|---------|--------|
+| Phrases per request | Single phrase |
+| Relative frequency | Server computes via JOIN |
+| Granularity aggregation | Server GROUP BY |
+| `granularity` API param | Sent to server (day/week/month/year, default month) |
+| Response `Point.v` | `f64` (relative frequency) |
+| `/totals` endpoint | Removed (not needed) |
+| Rate limit | 120 req/min (accounts for 10 parallel requests per search) |
 
 ### What does NOT change
 
@@ -446,7 +263,7 @@ GET /totals?start=2015-01-01&end=2025-01-01
 * phrase validation and normalization remain server-side
 * sparse response model remains (client zero-fills)
 * smoothing remains client-side
-* URL state model remains (just `g` param stops being sent to API)
+* URL state model remains (`g` param is sent to API, `s` param is frontend-only)
 
 ---
 
@@ -455,8 +272,7 @@ GET /totals?start=2015-01-01&end=2025-01-01
 Optimizations are valid if:
 
 * query correctness is preserved (same final chart output)
-* perceived latency for common queries decreases
-* ClickHouse load per query decreases
-* cache hit rate is measurable and meaningful
+* perceived latency for common queries decreases (parallel requests + cache hits)
+* cache hit rate is higher than multi-phrase API design
 * client-side transforms remain imperceptible (<50ms for typical data sizes)
-* no regression in response payload size beyond 3x for daily vs. monthly data
+* rate limit accommodates parallel per-phrase requests

@@ -2,14 +2,14 @@
 
 ## Critical (blocking for launch)
 
-- [ ] **Ingestion pipeline** — `server/crates/ingestion/src/main.rs` is a stub
-  - [ ] Fetch Parquet files from HuggingFace
-  - [ ] Parse/filter comments (type=comment, not deleted/dead, text not null)
-  - [ ] Tokenize and generate n-grams (RFC-001, RFC-002)
-  - [ ] Pass 1: compute global counts, build vocabulary
-  - [ ] Pass 2: aggregate daily counts with pruning
-  - [ ] Batch insert into ClickHouse
-  - [ ] Idempotency / checkpoint tracking
+- [x] **Ingestion pipeline** — implemented in `server/crates/ingestion/`
+  - [x] Fetch Parquet files from HuggingFace
+  - [x] Parse/filter comments (type=comment, not deleted/dead, text not null)
+  - [x] Tokenize and generate n-grams (RFC-001, RFC-002)
+  - [x] Pass 1: compute global counts, build vocabulary
+  - [x] Pass 2: aggregate daily counts with pruning
+  - [x] Batch insert into ClickHouse
+  - [x] Idempotency / checkpoint tracking
 
 - [ ] **Frontend implementation** — `client/src/App.tsx` is a placeholder
   - [ ] Generate SDK: `cd client && bun run generate`
@@ -35,5 +35,5 @@
 
 ## Low (polish)
 
-- [ ] **OpenAPI spec sync** — add CI check or pre-commit hook to keep `openapi.json` in sync with Rust types
+- [x] **OpenAPI spec sync** — `cargo run -p api --bin generate_openapi` generates from Rust types
 - [ ] **Methodology/about modal** — optional per RFC-006

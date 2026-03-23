@@ -114,25 +114,33 @@ Defined via Rust struct (must derive `IntoParams` + `Deserialize`):
 ```rust
 #[derive(Deserialize, IntoParams)]
 struct QueryParams {
-    /// Comma-separated phrases to query (max 10)
-    phrases: String,
+    /// Single phrase to query
+    phrase: String,
     /// Start date (YYYY-MM-DD). Default: HN_DEFAULT_START_DATE
     start: Option<String>,
     /// End date (YYYY-MM-DD). Default: today
     end: Option<String>,
+    /// Time bucket granularity. Default: month
+    granularity: Option<Granularity>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum Granularity {
+    Day,
+    Week,
+    Month,
+    Year,
 }
 ```
 
-Note: `phrases` is a comma-separated string (not array) for clean shareable URLs.
-
-Note: `granularity` was removed from the API (RFC-007-optimizations §3). The API always returns daily data. Granularity aggregation is performed client-side, like smoothing.
+Note: The API accepts a **single phrase** per request. Clients make one request per phrase in parallel (up to `MAX_PHRASES` concurrent requests). This enables independent per-phrase caching — adding or removing a phrase does not invalidate cached results for other phrases.
 
 ---
 
 ## Constraints
 
-* `phrases` splits to max 10 items
-* each phrase must tokenize to 1–3 tokens
+* `phrase` must tokenize to 1–3 tokens
 * `start <= end` (if both provided)
 * dates must be valid ISO format (YYYY-MM-DD)
 
@@ -144,6 +152,7 @@ Note: `granularity` was removed from the API (RFC-007-optimizations §3). The AP
 |-----------|---------|--------|
 | `start` | `2011-01-01` | `hn_clickhouse::HN_DEFAULT_START_DATE` |
 | `end` | today | computed at request time |
+| `granularity` | `month` | hardcoded default |
 
 The default start date (2011) is when HN reached ~1M comments/year, providing meaningful data density.
 
@@ -152,14 +161,13 @@ The default start date (2011) is when HN reached ~1M comments/year, providing me
 ## Rationale
 
 * GET allows caching and shareable URLs
-* comma-separated phrases work cleanly in URLs: `?phrases=rust,go,python`
+* single phrase per request enables independent caching per phrase × granularity × date range
 * optional params with sensible defaults reduce boilerplate
 
 ---
 
 ## Flexibility
 
-* may switch to POST if URL length becomes problematic (unlikely with 10 phrase limit)
 * validation rules may be tightened
 
 ---
@@ -171,7 +179,10 @@ The default start date (2011) is when HN reached ~1M comments/year, providing me
 ```rust
 #[derive(Serialize, ToSchema)]
 struct QueryResponse {
-    series: Vec<Series>,
+    phrase: String,
+    normalized: String,  // tokenized form used for lookup
+    status: SeriesStatus,
+    points: Vec<Point>,
     meta: QueryMeta,
 }
 
@@ -181,14 +192,6 @@ struct QueryMeta {
     start: String,
     end: String,
     granularity: String,
-}
-
-#[derive(Serialize, ToSchema)]
-struct Series {
-    phrase: String,
-    normalized: String,  // tokenized form used for lookup
-    status: SeriesStatus,
-    points: Vec<Point>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -202,7 +205,7 @@ enum SeriesStatus {
 #[derive(Serialize, ToSchema)]
 struct Point {
     t: String,     // bucket timestamp (YYYY-MM-DD)
-    v: u32,        // raw occurrence count (RFC-007-optimizations §2)
+    v: f64,        // relative frequency (count / total for that bucket)
 }
 ```
 
@@ -211,12 +214,12 @@ struct Point {
 ## Requirements
 
 * output sorted by time ascending
-* one series per input phrase (in input order)
-* for `Indexed` series: return **sparse** points (only buckets with non-zero counts). Frontend handles zero-fill.
-* for `NotIndexed` series: points array is empty
-* for `Invalid` series: points array is empty
+* one phrase per request, one response per request (flat object, not wrapped in array)
+* for `Indexed` status: return **sparse** points (only buckets with non-zero counts). Frontend handles zero-fill.
+* for `NotIndexed` status: points array is empty
+* for `Invalid` status: points array is empty
 * `meta` includes actual parameters used (after defaults applied)
-* `Point.v` is a raw count (`u32`), NOT a relative frequency — client computes frequency using `/totals` endpoint
+* `Point.v` is a relative frequency (`f64`) — server computes via JOIN with `bucket_totals`
 
 ---
 
@@ -224,9 +227,8 @@ struct Point {
 
 * stable structure for frontend charting
 * sparse responses reduce payload size and server work
-* raw counts eliminate the JOIN with `bucket_totals` on every query (RFC-007-optimizations §2)
+* server computes relative frequency via JOIN — trivial for single-phrase lookups
 * frontend zero-fills using `meta.start`, `meta.end`, and `meta.granularity` (cheap client-side with dayjs)
-* frontend computes relative frequency using cached `/totals` data
 * `normalized` field shows what was actually looked up (aids debugging)
 * `meta` enables reproducible queries and debugging
 
@@ -313,82 +315,32 @@ Points must still be sorted by time ascending.
 
 ---
 
-# 6.1 Totals Endpoint (RFC-007-optimizations §2)
+# 7. Granularity Handling
 
 ## Spec (mandatory)
 
-### Route
-
-```text
-GET /totals
-```
-
-### Query Parameters
-
-```rust
-#[derive(Deserialize, IntoParams)]
-struct TotalsParams {
-    /// Start date (YYYY-MM-DD). Default: 2011-01-01
-    start: Option<String>,
-    /// End date (YYYY-MM-DD). Default: today
-    end: Option<String>,
-}
-```
-
-### Response Schema
-
-```rust
-#[derive(Serialize, ToSchema)]
-struct TotalsResponse {
-    totals: Vec<TotalSeries>,  // one per n-gram order (1, 2, 3)
-    meta: TotalsMeta,
-}
-
-#[derive(Serialize, ToSchema)]
-struct TotalSeries {
-    n: u8,                      // n-gram order (1, 2, or 3)
-    points: Vec<TotalPoint>,    // sparse daily totals
-}
-
-#[derive(Serialize, ToSchema)]
-struct TotalPoint {
-    t: String,  // YYYY-MM-DD
-    v: u64,     // total n-gram count for this day and order
-}
-```
-
-### Caching
-
-Response includes `Cache-Control: public, max-age=86400` — totals change only on ingestion.
-
----
-
-## Rationale
-
-* eliminates the JOIN between `ngram_counts` and `bucket_totals` on every `/query` request
-* totals are small (~5,400 days × 3 n-orders) and change only on ingestion
-* client fetches totals once, caches locally, and computes relative frequency: `count / total`
-* main `/query` becomes a pure indexed key lookup in ClickHouse
-
----
-
-# 7. Granularity Handling (RFC-007-optimizations §3)
-
-## Spec
-
 * base storage: daily
-* API always returns **daily** data — no `granularity` parameter
-* granularity aggregation (week/month/year) is performed **client-side**
-* `granularity` is a frontend-only display parameter (like smoothing), persisted in URL as `g` but NOT sent to API
+* API accepts `granularity` parameter (`day`, `week`, `month`, `year`; default `month`)
+* server performs aggregation via ClickHouse SQL
+
+### SQL mapping
+
+| Granularity | SQL |
+|-------------|-----|
+| Day | raw daily data, no aggregation |
+| Week | `toStartOfWeek(bucket, 1) AS bucket ... GROUP BY bucket, ngram` |
+| Month | `toStartOfMonth(bucket) AS bucket ... GROUP BY bucket, ngram` |
+| Year | `toStartOfYear(bucket) AS bucket ... GROUP BY bucket, ngram` |
+
+Server JOINs with `bucket_totals` (aggregated at the same granularity) and returns relative frequency.
 
 ---
 
 ## Rationale
 
-* eliminates server-side GROUP BY
-* one cache key per (phrases, date range) regardless of granularity
-* switching granularity is instant — no network round-trip
-* daily data for 15 years is ~5,400 points per series (~100KB per series, ~200-300KB gzipped for 10 series)
+* server-side aggregation reduces payload size significantly (30x for monthly vs daily)
+* per-phrase caching compensates for the additional cache keys introduced by granularity
+* each phrase × granularity × date range is independently cached
 
 ---
 
@@ -453,8 +405,7 @@ struct ErrorDetail {
 
 | Code | HTTP Status | Condition |
 |------|-------------|-----------|
-| `MISSING_PHRASES` | 400 | `phrases` param empty or missing |
-| `TOO_MANY_PHRASES` | 400 | more than 10 phrases |
+| `MISSING_PHRASE` | 400 | `phrase` param empty or missing |
 | `INVALID_PHRASE` | 400 | phrase tokenizes to 0 or >3 tokens |
 | `INVALID_DATE_FORMAT` | 400 | date not in YYYY-MM-DD format |
 | `INVALID_DATE_RANGE` | 400 | start > end |
@@ -551,7 +502,7 @@ N-gram data is effectively immutable between ingestion runs. API responses must 
 Cache-Control: public, max-age=3600
 ```
 
-Set directly by the Rust API on `/query` responses (and `/totals` when added).
+Set directly by the Rust API on `/query` responses.
 
 ### Static assets
 
@@ -567,6 +518,7 @@ Cache expires naturally via `max-age`. On ingestion, new data appears after TTL 
 
 * data changes only on ingestion (daily at most)
 * repeated queries for popular phrases are served from intermediary caches
+* per-phrase API design maximizes cache hit rates — each phrase × granularity × date range is independently cached, so adding a new phrase to a search reuses cached results for existing phrases
 * highest-ROI optimization with near-zero complexity
 
 ---
@@ -591,7 +543,7 @@ api.example.com {
     rate_limit {
         zone api {
             key {remote_host}
-            events 60
+            events 120
             window 1m
         }
     }
@@ -602,8 +554,10 @@ api.example.com {
 
 ### Limits
 
-* **per-IP**: 60 requests/minute
+* **per-IP**: 120 requests/minute
 * **burst**: handled by zone configuration
+
+Note: The higher limit (120 vs 60) accounts for the per-phrase API design where each search fires up to 10 parallel requests (one per phrase).
 
 ---
 

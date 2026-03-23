@@ -205,7 +205,7 @@ No router library. Use `URLSearchParams` + `history.pushState` / `popstate` dire
 * `q` = comma-separated phrases
 * `start` = ISO date (YYYY-MM-DD)
 * `end` = ISO date (YYYY-MM-DD)
-* `g` = granularity (`day|week|month|year`) — frontend-only, NOT sent to API
+* `g` = granularity (`day|week|month|year`) — sent to API as `granularity`
 * `s` = smoothing integer — frontend-only, NOT sent to API
 
 Example:
@@ -214,14 +214,14 @@ Example:
 /?q=rust,go,startups&start=2015-01-01&end=2025-01-01&g=month&s=3
 ```
 
-### Granularity, smoothing, and the API query key (RFC-007-optimizations §3)
+### Granularity, smoothing, and the API query key
 
-Both `g` (granularity) and `s` (smoothing) are **frontend-only display parameters**. They are persisted in the URL for shareability but must NOT:
+`g` (granularity) is sent to the API and included in the TanStack Query key. `s` (smoothing) is a **frontend-only display parameter** — it is persisted in the URL for shareability but must NOT:
 
 * be sent to the backend API
 * be included in the TanStack Query key
 
-The API always returns daily raw counts. The frontend aggregates to the requested granularity and applies smoothing. Changing either is instant — no network round-trip.
+Changing smoothing is instant (no network round-trip). Changing granularity triggers new API requests (but per-phrase caching means only uncached phrase × granularity combinations are fetched).
 
 ---
 
@@ -291,7 +291,7 @@ Do not introduce global client state store unless a concrete need emerges.
 
 ### Endpoint
 
-`GET /query` with query parameters (per RFC-005). Not a POST with JSON body.
+`GET /query` with query parameters (per RFC-005). Not a POST with JSON body. Each request queries a **single phrase**.
 
 ### SDK
 
@@ -305,28 +305,36 @@ Kubb is already configured to generate:
 
 Use the generated hooks directly. They provide typed request params, typed responses, and automatic query key management.
 
+### Per-phrase parallel requests
+
+The frontend makes **one request per phrase** (up to 10 phrases in parallel). Each phrase gets its own TanStack Query instance with key `["query", phrase, start, end, granularity]`.
+
+Benefits:
+
+* adding a new phrase does not re-fetch existing cached phrases
+* removing a phrase does not invalidate any cache entries
+* each phrase × granularity × date range is independently cached by both TanStack Query and HTTP caches
+
 ### Error handling
 
 The client adapter (`lib/client.ts`) must parse structured error responses from RFC-005:
 
 ```json
-{ "error": { "code": "TOO_MANY_PHRASES", "message": "Maximum 10 phrases allowed" } }
+{ "error": { "code": "INVALID_PHRASE", "message": "Phrase tokenizes to more than 3 tokens" } }
 ```
 
 The adapter must extract and surface the `error.code` and `error.message` fields so the UI can map them to user-friendly messages (see §19).
 
 ### Response structure
 
-The API returns (per RFC-005):
+Each request returns a **flat object** (per RFC-005):
 
 ```typescript
 {
-  series: Array<{
-    phrase: string;       // original input
-    normalized: string;   // tokenized form used for lookup
-    status: "indexed" | "not_indexed" | "invalid";
-    points: Array<{ t: string; v: number }>;
-  }>;
+  phrase: string;         // original input
+  normalized: string;     // tokenized form used for lookup
+  status: "indexed" | "not_indexed" | "invalid";
+  points: Array<{ t: string; v: number }>;  // v is f64 relative frequency
   meta: {
     tokenizer_version: string;
     start: string;
@@ -338,9 +346,9 @@ The API returns (per RFC-005):
 
 The `meta` object is available for debugging but does not need prominent display in v1.
 
-### Phrase ordering contract
+### Phrase matching
 
-The API returns `series[]` in the **same order** as the input `phrases` param. The frontend uses array index to match `series[i]` to `userInputPhrases[i]`.
+Each response corresponds to exactly one phrase. The frontend matches responses to user-entered phrases by the `phrase` field (which echoes the input).
 
 ---
 
@@ -348,13 +356,13 @@ The API returns `series[]` in the **same order** as the input `phrases` param. T
 
 * generated code must be treated as read-only
 * query keys must be stable and derived from request params (excluding smoothing)
-* `series[i]` matched to user input by index, not by string comparison
+* each phrase results in an independent TanStack Query with key `["query", phrase, start, end, granularity]`
 
 ---
 
 ## Rationale
 
-Kubb-generated hooks eliminate SDK drift. Index-based matching avoids the problem of user input not matching the normalized form returned by the server.
+Kubb-generated hooks eliminate SDK drift. Per-phrase requests enable independent caching — the most common user action (adding/removing a phrase) reuses all existing cached data.
 
 ---
 
@@ -558,22 +566,22 @@ Fetch occurs when:
 
 ## Query key
 
-Must include:
+Each phrase gets its own TanStack Query. The key must include:
 
-* phrases
+* phrase (single phrase, not comma-separated list)
 * start
 * end
+* granularity
 
 Must NOT include:
 
-* granularity (frontend-only — not sent to API, per RFC-007-optimizations §3)
 * smoothing (frontend-only — not sent to API)
 
 ---
 
 ## Rationale
 
-Granularity and smoothing are applied client-side. Excluding them from the query key means changing either reuses cached data — no network request.
+Per-phrase query keys mean adding or removing a phrase reuses all existing cached data. Smoothing is applied client-side, so excluding it from the query key means changing smoothing reuses cached data with no network request.
 
 ---
 
@@ -733,56 +741,31 @@ Optional:
 
 Create a small transformation layer between API response and chart props.
 
-Responsibilities (RFC-007-optimizations §2-4):
+Responsibilities:
 
-* zero-fill sparse backend data into continuous daily bucket sequences
-* aggregate daily data to requested granularity (week/month/year)
-* compute relative frequency using cached `/totals` data
+* zero-fill sparse backend data into continuous bucket sequences (using `meta.start`, `meta.end`, `meta.granularity`)
 * apply centered moving average smoothing
 * map data into ECharts series format
 * format tooltip values
-* match series to user-entered phrases by index
+* match series to user-entered phrases
 
 NOT frontend responsibilities (handled by backend):
 
 * tokenization / normalization — backend handles via RFC-001
+* relative frequency computation — server JOINs with `bucket_totals`
+* granularity aggregation — server performs GROUP BY
 
 This logic must not be embedded directly in page JSX.
 
 ### Zero-fill implementation
 
-The frontend must generate the expected daily bucket sequence from `start` and `end`, then fill in values from the sparse backend data.
+The frontend must generate the expected bucket sequence from `meta.start`, `meta.end`, and `meta.granularity`, then fill in values from the sparse backend data.
 
 Missing buckets get `v: 0`.
 
-### Granularity aggregation (RFC-007-optimizations §3)
-
-After zero-fill, aggregate daily counts to the requested granularity:
-
-```typescript
-function aggregateToGranularity(
-  dailyCounts: Point[],
-  dailyTotals: TotalPoint[],
-  granularity: 'day' | 'week' | 'month' | 'year'
-): ChartPoint[] {
-  if (granularity === 'day') {
-    return dailyCounts.map(c => ({
-      t: c.t,
-      v: c.v / getTotalForDay(dailyTotals, c.t)
-    }));
-  }
-  // Group daily counts and totals by period, sum each, divide
-  const periods = groupByPeriod(dailyCounts, granularity);
-  const totalPeriods = groupByPeriod(dailyTotals, granularity);
-  return periods.map(p => ({
-    t: p.periodStart,
-    v: p.sumCounts / totalPeriods.get(p.periodStart)
-  }));
-}
-```
-
 Use dayjs for bucket alignment:
 
+* `day` — increment by 1 day
 * `week` — align to Monday, increment by 7 days
 * `month` — align to 1st of month, increment by 1 month
 * `year` — align to Jan 1, increment by 1 year
@@ -805,10 +788,8 @@ function applySmoothing(points: Point[], window: number): Point[] {
 ### Transform pipeline
 
 ```text
-sparse raw counts (from /query)
-  + cached totals (from /totals)
-  → zero-fill daily counts
-  → aggregate to granularity (sum counts and totals per period, divide)
+sparse relative frequencies (from /query, one response per phrase)
+  → zero-fill using meta.start, meta.end, meta.granularity
   → apply smoothing
   → ECharts format
 ```
@@ -816,16 +797,15 @@ sparse raw counts (from /query)
 Each step is independently memoizable:
 
 * zero-fill — recomputes only when raw data or date range changes
-* aggregation — recomputes only when granularity changes
 * smoothing — recomputes only when smoothing window changes
 
-Changing granularity or smoothing reuses cached API data — no network request.
+Changing smoothing reuses cached API data — no network request.
 
 ---
 
 ## Rationale
 
-Keeping zero-fill, granularity aggregation, frequency computation, and smoothing frontend-side reduces network payload (sparse data) and server work. Granularity and smoothing changes are instant with no API round-trip. All transforms are simple array arithmetic, trivial in JS.
+Server handles frequency computation and granularity aggregation. Frontend handles zero-fill (sparse data), smoothing (display-only), and chart formatting. Smoothing changes are instant with no API round-trip. All frontend transforms are simple array arithmetic, trivial in JS.
 
 ---
 

@@ -37,9 +37,9 @@
         "operationId": "query",
         "parameters": [
           {
-            "name": "phrases",
+            "name": "phrase",
             "in": "query",
-            "description": "Comma-separated phrases to query (max 10)",
+            "description": "Single phrase to query",
             "required": true,
             "schema": {
               "type": "string"
@@ -64,11 +64,21 @@
               "type": "string",
               "nullable": true
             }
+          },
+          {
+            "name": "granularity",
+            "in": "query",
+            "description": "Time granularity: day, week, month, year. Default: month",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Query results",
+            "description": "Query result for a single phrase",
             "content": {
               "application/json": {
                 "schema": {
@@ -79,58 +89,6 @@
           },
           "400": {
             "description": "Invalid query parameters",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/totals": {
-      "get": {
-        "tags": [
-          "crate"
-        ],
-        "operationId": "totals",
-        "parameters": [
-          {
-            "name": "start",
-            "in": "query",
-            "description": "Start date (YYYY-MM-DD). Default: 2011-01-01",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true
-            }
-          },
-          {
-            "name": "end",
-            "in": "query",
-            "description": "End date (YYYY-MM-DD). Default: today",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Bucket totals for normalization",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TotalsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid parameters",
             "content": {
               "application/json": {
                 "schema": {
@@ -202,10 +160,9 @@
             "description": "Bucket timestamp (YYYY-MM-DD)"
           },
           "v": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Raw occurrence count (client computes relative frequency using /totals)",
-            "minimum": 0
+            "type": "number",
+            "format": "double",
+            "description": "Relative frequency (count / total_count)"
           }
         }
       },
@@ -214,10 +171,14 @@
         "required": [
           "tokenizer_version",
           "start",
-          "end"
+          "end",
+          "granularity"
         ],
         "properties": {
           "end": {
+            "type": "string"
+          },
+          "granularity": {
             "type": "string"
           },
           "start": {
@@ -230,8 +191,9 @@
       },
       "QueryParams": {
         "type": "object",
+        "description": "Query a single phrase's n-gram frequency over time.\nThe client makes one request per phrase (up to MAX_PHRASES in parallel).",
         "required": [
-          "phrases"
+          "phrase"
         ],
         "properties": {
           "end": {
@@ -239,9 +201,14 @@
             "description": "End date (YYYY-MM-DD). Default: today",
             "nullable": true
           },
-          "phrases": {
+          "granularity": {
             "type": "string",
-            "description": "Comma-separated phrases to query (max 10)"
+            "description": "Time granularity: day, week, month, year. Default: month",
+            "nullable": true
+          },
+          "phrase": {
+            "type": "string",
+            "description": "Single phrase to query"
           },
           "start": {
             "type": "string",
@@ -253,30 +220,16 @@
       "QueryResponse": {
         "type": "object",
         "required": [
-          "series",
+          "phrase",
+          "normalized",
+          "status",
+          "points",
           "meta"
         ],
         "properties": {
           "meta": {
             "$ref": "#/components/schemas/QueryMeta"
           },
-          "series": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Series"
-            }
-          }
-        }
-      },
-      "Series": {
-        "type": "object",
-        "required": [
-          "phrase",
-          "normalized",
-          "status",
-          "points"
-        ],
-        "properties": {
           "normalized": {
             "type": "string",
             "description": "Normalized/tokenized form used for lookup"
@@ -290,7 +243,7 @@
             "items": {
               "$ref": "#/components/schemas/Point"
             },
-            "description": "Data points (empty for NotIndexed/Invalid)"
+            "description": "Sparse data points (only non-zero buckets). Client handles zero-fill."
           },
           "status": {
             "$ref": "#/components/schemas/SeriesStatus"
@@ -304,100 +257,6 @@
           "not_indexed",
           "invalid"
         ]
-      },
-      "TotalPoint": {
-        "type": "object",
-        "required": [
-          "t",
-          "v"
-        ],
-        "properties": {
-          "t": {
-            "type": "string",
-            "description": "Bucket timestamp (YYYY-MM-DD)"
-          },
-          "v": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Total n-gram count for this day and order",
-            "minimum": 0
-          }
-        }
-      },
-      "TotalSeries": {
-        "type": "object",
-        "required": [
-          "n",
-          "points"
-        ],
-        "properties": {
-          "n": {
-            "type": "integer",
-            "format": "int32",
-            "description": "N-gram order (1, 2, or 3)",
-            "minimum": 0
-          },
-          "points": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TotalPoint"
-            },
-            "description": "Sparse daily total counts (only non-zero days)"
-          }
-        }
-      },
-      "TotalsMeta": {
-        "type": "object",
-        "required": [
-          "tokenizer_version",
-          "start",
-          "end"
-        ],
-        "properties": {
-          "end": {
-            "type": "string"
-          },
-          "start": {
-            "type": "string"
-          },
-          "tokenizer_version": {
-            "type": "string"
-          }
-        }
-      },
-      "TotalsParams": {
-        "type": "object",
-        "properties": {
-          "end": {
-            "type": "string",
-            "description": "End date (YYYY-MM-DD). Default: today",
-            "nullable": true
-          },
-          "start": {
-            "type": "string",
-            "description": "Start date (YYYY-MM-DD). Default: 2011-01-01",
-            "nullable": true
-          }
-        }
-      },
-      "TotalsResponse": {
-        "type": "object",
-        "required": [
-          "totals",
-          "meta"
-        ],
-        "properties": {
-          "meta": {
-            "$ref": "#/components/schemas/TotalsMeta"
-          },
-          "totals": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TotalSeries"
-            },
-            "description": "One entry per n-gram order (1, 2, 3), each containing sparse daily totals"
-          }
-        }
       }
     }
   }
