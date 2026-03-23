@@ -5,6 +5,9 @@ node_modules/
 dist/
 target/
 
+# HN data
+hn/
+
 # Generated files
 client/src/gen/
 
