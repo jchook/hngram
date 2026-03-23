@@ -5,15 +5,11 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PORT=8123
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
-      - CLICKHOUSE_DATABASE=hn_ngram
-      - API_PORT=3000
-      - API_HOST=0.0.0.0
-      - RUST_LOG=info
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -22,7 +18,6 @@ services:
     image: clickhouse/clickhouse-server:24.3-alpine
     ports:
       - "8123:8123"
-      - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./server/etc/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro

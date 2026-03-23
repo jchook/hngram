@@ -359,18 +359,30 @@ pub async fn ngram(
     };
 
     match query_result {
-        Ok(points) if points.is_empty() => (
-            StatusCode::OK,
-            [(header::CACHE_CONTROL, "public, max-age=3600")],
-            Json(QueryResponse {
-                phrase: phrase.to_string(),
-                normalized,
-                status: SeriesStatus::NotIndexed,
-                points: vec![],
-                meta,
-            }),
-        )
-            .into_response(),
+        Ok(points) if points.is_empty() => {
+            // Determine status: unigrams are always indexed (never pruned).
+            // For bigrams/trigrams, check the vocabulary table.
+            let status = if n == 1 {
+                SeriesStatus::Indexed
+            } else {
+                match state.clickhouse.is_in_vocabulary(n, &normalized).await {
+                    Ok(true) => SeriesStatus::Indexed,
+                    _ => SeriesStatus::NotIndexed,
+                }
+            };
+            (
+                StatusCode::OK,
+                [(header::CACHE_CONTROL, "public, max-age=3600")],
+                Json(QueryResponse {
+                    phrase: phrase.to_string(),
+                    normalized,
+                    status,
+                    points: vec![],
+                    meta,
+                }),
+            )
+                .into_response()
+        }
         Ok(points) => (
             StatusCode::OK,
             [(header::CACHE_CONTROL, "public, max-age=3600")],

@@ -11,10 +11,38 @@ services:
       - caddy_config:/config
     depends_on:
       - api
+    restart: unless-stopped
 
   api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
     environment:
+      - CLICKHOUSE_HOST=clickhouse
       - RUST_LOG=warn
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./server/etc/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      - ./server/etc/clickhouse/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
+      - ./server/etc/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    environment:
+      - CLICKHOUSE_DB=hn_ngram
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
 volumes:
   caddy_data:
