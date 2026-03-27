@@ -3,7 +3,6 @@
 use crate::manifest::Manifest;
 use crate::months::YearMonth;
 use crate::parquet;
-use crate::vocabulary;
 use anyhow::{bail, Context};
 use hn_clickhouse::{BucketTotalRow, HnClickHouse, NgramCountRow};
 use std::path::Path;
@@ -30,9 +29,10 @@ pub async fn backfill_phase(
         );
     }
 
-    // Load vocabulary
-    tracing::info!("Loading vocabulary...");
-    let vocabulary = vocabulary::load_vocabulary(data_dir)?;
+    // Load vocabulary from ClickHouse
+    tracing::info!("Loading vocabulary from ClickHouse...");
+    let vocabulary = ch.load_vocabulary().await
+        .context("Failed to load vocabulary from ClickHouse")?;
     let vocab_size = vocabulary.len();
     tracing::info!("  Loaded {} admitted n-grams", vocab_size);
 

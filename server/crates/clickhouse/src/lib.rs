@@ -5,7 +5,7 @@
 
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
 
@@ -249,6 +249,11 @@ impl HnClickHouse {
     // Query Operations (for API)
     // ========================================================================
 
+    /// Format a Date as "YYYY-MM-DD" for use in query bind params.
+    fn date_str(d: Date) -> String {
+        format!("{}-{:02}-{:02}", d.year(), d.month() as u8, d.day())
+    }
+
     /// Query daily n-gram counts with totals (RFC-003 Section 7)
     pub async fn query_ngrams(
         &self,
@@ -291,8 +296,8 @@ impl HnClickHouse {
             .bind(&self.tokenizer_version)
             .bind(n)
             .bind(ngrams)
-            .bind(start)
-            .bind(end)
+            .bind(Self::date_str(start).as_str())
+            .bind(Self::date_str(end).as_str())
             .fetch_all::<NgramQueryResult>()
             .await?;
 
@@ -350,12 +355,32 @@ impl HnClickHouse {
             .bind(&self.tokenizer_version)
             .bind(n)
             .bind(ngrams)
-            .bind(start)
-            .bind(end)
+            .bind(Self::date_str(start).as_str())
+            .bind(Self::date_str(end).as_str())
             .fetch_all::<AggregatedQueryResult>()
             .await?;
 
         Ok(results)
+    }
+
+    /// Load the full admitted vocabulary as a set of (n, ngram) pairs.
+    pub async fn load_vocabulary(&self) -> Result<HashMap<(u8, String), ()>> {
+        let query = format!(
+            r#"
+            SELECT n, ngram
+            FROM {TABLE_NGRAM_VOCABULARY} FINAL
+            WHERE tokenizer_version = ?
+            "#
+        );
+
+        let rows: Vec<VocabularyCheckRow> = self
+            .client
+            .query(&query)
+            .bind(&self.tokenizer_version)
+            .fetch_all()
+            .await?;
+
+        Ok(rows.into_iter().map(|r| ((r.n, r.ngram), ())).collect())
     }
 
     /// Check if an n-gram exists in vocabulary

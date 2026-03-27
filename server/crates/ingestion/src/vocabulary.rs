@@ -21,11 +21,6 @@ fn partial_path(data_dir: &Path, ym: &YearMonth) -> PathBuf {
     partial_dir(data_dir).join(format!("{}.counts", ym))
 }
 
-/// Path for the vocabulary file.
-fn vocabulary_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("vocabulary.json")
-}
-
 /// Write partial global counts to a TSV file: n\tngram\tcount\n
 fn write_partial_counts(
     path: &Path,
@@ -88,11 +83,6 @@ pub async fn build_vocabulary_phase(
     manifest: &mut Manifest,
     ch: &HnClickHouse,
 ) -> anyhow::Result<()> {
-    if manifest.vocabulary_built {
-        tracing::info!("Vocabulary already built — skipping (delete manifest to rebuild)");
-        return Ok(());
-    }
-
     let total = months.len();
     let config = PruningConfig::from_env();
 
@@ -199,7 +189,7 @@ pub async fn build_vocabulary_phase(
     );
 
     // Step 3: Build vocabulary
-    let vocabulary = build_vocabulary(&global_counts, &config);
+    let mut vocabulary = build_vocabulary(&global_counts, &config);
 
     let admitted_bigrams = vocabulary.iter().filter(|((n, _), _)| *n == 2).count();
     let admitted_trigrams = vocabulary.iter().filter(|((n, _), _)| *n == 3).count();
@@ -213,32 +203,29 @@ pub async fn build_vocabulary_phase(
     );
     tracing::info!("  Merge elapsed: {:.1}s", merge_start.elapsed().as_secs_f64());
 
-    // Step 4: Write vocabulary to JSON
-    let vocab_entries: Vec<(u8, String, u64)> = vocabulary
+    // Merge with previous vocabulary from ClickHouse (append-only: never drop)
+    let prev_vocab = ch.load_vocabulary().await.unwrap_or_default();
+    let new_admissions = vocabulary.keys().filter(|k| !prev_vocab.contains_key(k)).count();
+    tracing::info!("  Previously admitted: {}, new admissions: {}", prev_vocab.len(), new_admissions);
+
+    // Retain all previously admitted n-grams
+    for (key, val) in &prev_vocab {
+        vocabulary.entry(key.clone()).or_insert(val.clone());
+    }
+
+    // Insert into ClickHouse (ReplacingMergeTree handles dedup)
+    let now = time::OffsetDateTime::now_utc();
+    let rows: Vec<NgramVocabularyRow> = vocabulary
         .keys()
         .map(|(n, ngram)| {
             let count = global_counts.get(&(*n, ngram.clone())).copied().unwrap_or(0);
-            (*n, ngram.clone(), count)
-        })
-        .collect();
-
-    let vocab_json = serde_json::to_string_pretty(&vocab_entries)?;
-    std::fs::write(vocabulary_path(data_dir), &vocab_json)?;
-    tracing::info!(
-        "Vocabulary written to {}",
-        vocabulary_path(data_dir).display()
-    );
-
-    // Step 5: Insert vocabulary into ClickHouse
-    let now = time::OffsetDateTime::now_utc();
-    let rows: Vec<NgramVocabularyRow> = vocab_entries
-        .iter()
-        .map(|(n, ngram, global_count)| NgramVocabularyRow {
-            tokenizer_version: TOKENIZER_VERSION.to_string(),
-            n: *n,
-            ngram: ngram.clone(),
-            global_count: *global_count,
-            admitted_at: now,
+            NgramVocabularyRow {
+                tokenizer_version: TOKENIZER_VERSION.to_string(),
+                n: *n,
+                ngram: ngram.clone(),
+                global_count: count,
+                admitted_at: now,
+            }
         })
         .collect();
 
@@ -253,11 +240,3 @@ pub async fn build_vocabulary_phase(
     Ok(())
 }
 
-/// Load admitted vocabulary from JSON file.
-pub fn load_vocabulary(data_dir: &Path) -> anyhow::Result<HashMap<(u8, String), ()>> {
-    let path = vocabulary_path(data_dir);
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read vocabulary at {}", path.display()))?;
-    let entries: Vec<(u8, String, u64)> = serde_json::from_str(&data)?;
-    Ok(entries.into_iter().map(|(n, ngram, _)| ((n, ngram), ())).collect())
-}
