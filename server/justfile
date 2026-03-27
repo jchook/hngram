@@ -1,5 +1,5 @@
 up:
-    cargo run -p api --bin api
+    watchexec -r -w crates -- cargo run -p api --bin api
 
 test:
     cargo test
