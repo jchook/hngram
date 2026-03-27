@@ -6,7 +6,7 @@
  * - named exports: RequestConfig and ResponseErrorConfig types
  */
 
-const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:3000';
+const API_BASE = '/api';
 
 export type RequestConfig = {
   method: string;
