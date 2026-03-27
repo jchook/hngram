@@ -128,8 +128,8 @@ Prod adds `config.prod.xml` with memory/pool limits for small VPS.
 |-------|---------|
 | `tokenizer` | Tokenization rules (RFC-001), n-gram counting/pruning (RFC-002) |
 | `hn-clickhouse` | Schema types, insert/query functions (RFC-003) |
-| `api` | HTTP endpoints, OpenAPI spec (RFC-005) |
 | `ingestion` | HuggingFace → tokenize → ClickHouse pipeline (RFC-004) |
+| `api` | HTTP endpoints, OpenAPI spec (RFC-005) |
 
 ## Tokenizer Version
 
