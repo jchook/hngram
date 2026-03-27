@@ -7,49 +7,70 @@
 
 use std::collections::HashMap;
 
-/// Configuration for n-gram pruning thresholds
+/// Per-n pruning thresholds
+#[derive(Debug, Clone)]
+pub struct NgramThreshold {
+    /// Minimum global count to be admitted to vocabulary
+    pub min_global: u64,
+    /// Minimum per-bucket count to be included in daily aggregates
+    pub min_bucket: u32,
+}
+
+/// Configuration for n-gram pruning thresholds.
+///
+/// Thresholds are stored per-n (keyed by n-gram order).
+/// Unigrams (n=1) default to no pruning. Higher n values
+/// can be added to support 4-grams, 5-grams, etc.
 #[derive(Debug, Clone)]
 pub struct PruningConfig {
-    /// Minimum global count for bigrams to be admitted (default: 20)
-    pub min_bigram_global: u64,
-    /// Minimum global count for trigrams to be admitted (default: 10)
-    pub min_trigram_global: u64,
-    /// Minimum per-bucket count for bigrams (default: 3)
-    pub min_bigram_bucket: u32,
-    /// Minimum per-bucket count for trigrams (default: 5)
-    pub min_trigram_bucket: u32,
+    /// Thresholds keyed by n-gram order (n)
+    thresholds: HashMap<u8, NgramThreshold>,
 }
 
 impl Default for PruningConfig {
     fn default() -> Self {
-        Self {
-            min_bigram_global: 20,
-            min_trigram_global: 10,
-            min_bigram_bucket: 3,
-            min_trigram_bucket: 5,
-        }
+        let mut thresholds = HashMap::new();
+        thresholds.insert(1, NgramThreshold { min_global: 0, min_bucket: 1 });
+        thresholds.insert(2, NgramThreshold { min_global: 20, min_bucket: 3 });
+        thresholds.insert(3, NgramThreshold { min_global: 10, min_bucket: 5 });
+        Self { thresholds }
     }
 }
 
 impl PruningConfig {
+    /// Load from environment variables, falling back to defaults.
+    ///
+    /// Env vars follow the pattern:
+    ///   PRUNE_MIN_{N}GRAM_GLOBAL  (e.g. PRUNE_MIN_2GRAM_GLOBAL=500)
+    ///   PRUNE_MIN_{N}GRAM_BUCKET  (e.g. PRUNE_MIN_2GRAM_BUCKET=5)
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        for n in 1..=9u8 {
+            let global_key = format!("PRUNE_MIN_{}GRAM_GLOBAL", n);
+            let bucket_key = format!("PRUNE_MIN_{}GRAM_BUCKET", n);
+            let global = std::env::var(&global_key).ok().and_then(|v| v.parse().ok());
+            let bucket = std::env::var(&bucket_key).ok().and_then(|v| v.parse().ok());
+            if global.is_some() || bucket.is_some() {
+                let existing = config.thresholds.get(&n).cloned();
+                let default_t = NgramThreshold { min_global: 0, min_bucket: 1 };
+                let base = existing.as_ref().unwrap_or(&default_t);
+                config.thresholds.insert(n, NgramThreshold {
+                    min_global: global.unwrap_or(base.min_global),
+                    min_bucket: bucket.unwrap_or(base.min_bucket),
+                });
+            }
+        }
+        config
+    }
+
     /// Get the minimum global count threshold for a given n
     pub fn min_global_count(&self, n: u8) -> u64 {
-        match n {
-            1 => 0, // No pruning for unigrams
-            2 => self.min_bigram_global,
-            3 => self.min_trigram_global,
-            _ => u64::MAX, // Reject n > 3
-        }
+        self.thresholds.get(&n).map(|t| t.min_global).unwrap_or(u64::MAX)
     }
 
     /// Get the minimum per-bucket count threshold for a given n
     pub fn min_bucket_count(&self, n: u8) -> u32 {
-        match n {
-            1 => 1, // Unigrams always kept if count >= 1
-            2 => self.min_bigram_bucket,
-            3 => self.min_trigram_bucket,
-            _ => u32::MAX,
-        }
+        self.thresholds.get(&n).map(|t| t.min_bucket).unwrap_or(u32::MAX)
     }
 }
 
@@ -217,10 +238,15 @@ mod tests {
     #[test]
     fn test_pruning_config_defaults() {
         let config = PruningConfig::default();
-        assert_eq!(config.min_bigram_global, 20);
-        assert_eq!(config.min_trigram_global, 10);
-        assert_eq!(config.min_bigram_bucket, 3);
-        assert_eq!(config.min_trigram_bucket, 5);
+        assert_eq!(config.min_global_count(1), 0);
+        assert_eq!(config.min_global_count(2), 20);
+        assert_eq!(config.min_global_count(3), 10);
+        assert_eq!(config.min_bucket_count(1), 1);
+        assert_eq!(config.min_bucket_count(2), 3);
+        assert_eq!(config.min_bucket_count(3), 5);
+        // Unknown n values are rejected
+        assert_eq!(config.min_global_count(4), u64::MAX);
+        assert_eq!(config.min_bucket_count(4), u32::MAX);
     }
 
     #[test]

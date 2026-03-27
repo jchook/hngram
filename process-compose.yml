@@ -1,0 +1,10 @@
+version: "0.5"
+
+processes:
+  api:
+    command: cargo run -p api --bin api
+    working_dir: ./server
+
+  client:
+    command: bun run dev
+    working_dir: ./client

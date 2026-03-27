@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- Prod tuning for small VPS (per RFC-003 Section 12) -->
+
+    <!-- Reduce background merge threads -->
+    <background_pool_size>2</background_pool_size>
+    <background_schedule_pool_size>2</background_schedule_pool_size>
+    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+
+    <!-- Limit concurrent queries -->
+    <max_concurrent_queries>20</max_concurrent_queries>
+</clickhouse>

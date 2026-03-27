@@ -8,6 +8,12 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/jchook/hn-ngram"
 
+[profile.dev.package.ingestion]
+opt-level = 2
+
+[profile.dev.package.tokenizer]
+opt-level = 2
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -38,6 +44,9 @@ anyhow = "1"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Environment
+dotenvy = "0.15"
 
 # Internal crates
 tokenizer = { path = "crates/tokenizer" }

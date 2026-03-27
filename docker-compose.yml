@@ -1,20 +1,6 @@
 services:
-  api:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      - CLICKHOUSE_HOST=clickhouse
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-
   clickhouse:
+    init: true
     image: clickhouse/clickhouse-server:24.3-alpine
     ports:
       - "8123:8123"

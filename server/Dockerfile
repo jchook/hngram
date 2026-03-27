@@ -8,12 +8,14 @@ WORKDIR /app
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/tokenizer/Cargo.toml crates/tokenizer/
+COPY crates/clickhouse/Cargo.toml crates/clickhouse/
 COPY crates/api/Cargo.toml crates/api/
 COPY crates/ingestion/Cargo.toml crates/ingestion/
 
 # Create dummy source files for dependency caching
-RUN mkdir -p crates/tokenizer/src crates/api/src crates/ingestion/src && \
+RUN mkdir -p crates/tokenizer/src crates/clickhouse/src crates/api/src crates/ingestion/src && \
     echo "pub fn dummy() {}" > crates/tokenizer/src/lib.rs && \
+    echo "pub fn dummy() {}" > crates/clickhouse/src/lib.rs && \
     echo "fn main() {}" > crates/api/src/main.rs && \
     echo "fn main() {}" > crates/ingestion/src/main.rs
 

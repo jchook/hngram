@@ -1,0 +1,8 @@
+up:
+    cargo run -p api --bin api
+
+test:
+    cargo test
+
+openapi:
+    cargo run -p api --bin generate_openapi > openapi.json

@@ -1,0 +1,5 @@
+up:
+    bun run dev
+
+gen:
+    bun run gen

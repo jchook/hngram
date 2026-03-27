@@ -7,7 +7,7 @@
     "dev": "rsbuild dev",
     "build": "rsbuild build",
     "preview": "rsbuild preview",
-    "generate": "kubb generate",
+    "gen": "kubb generate",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

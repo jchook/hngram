@@ -36,7 +36,7 @@ pub async fn backfill_phase(
     let vocab_size = vocabulary.len();
     tracing::info!("  Loaded {} admitted n-grams", vocab_size);
 
-    let config = PruningConfig::default();
+    let config = PruningConfig::from_env();
     let total = months.len();
     let tv = TOKENIZER_VERSION.to_string();
 

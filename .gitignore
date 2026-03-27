@@ -11,6 +11,9 @@ hn/
 # Generated files
 client/src/gen/
 
+# Data
+server/hn-data/
+
 # Environment
 .env
 .env.local

@@ -88,51 +88,88 @@ pub async fn build_vocabulary_phase(
     manifest: &mut Manifest,
     ch: &HnClickHouse,
 ) -> anyhow::Result<()> {
+    if manifest.vocabulary_built {
+        tracing::info!("Vocabulary already built — skipping (delete manifest to rebuild)");
+        return Ok(());
+    }
+
     let total = months.len();
-    let config = PruningConfig::default();
+    let config = PruningConfig::from_env();
 
     // Step 1: Process each file to produce partial count files
-    for (i, ym) in months.iter().enumerate() {
+    // Collect pending months (skip already-done and missing files)
+    let pending: Vec<(usize, &YearMonth)> = months
+        .iter()
+        .enumerate()
+        .filter(|(_, ym)| {
+            let rel_path = ym.file_path();
+            if manifest.is_phase1_done(&rel_path) {
+                tracing::debug!("Skipping phase 1 for {} (already done)", rel_path);
+                return false;
+            }
+            let local_path = data_dir.join(&rel_path);
+            if !local_path.exists() {
+                tracing::warn!("File not found: {} — skipping", local_path.display());
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    let pending_total = pending.len();
+    tracing::info!("{} of {} months need processing", pending_total, total);
+
+    // Process months concurrently with bounded parallelism
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    ));
+
+    let mut handles = Vec::with_capacity(pending_total);
+
+    for (i, ym) in pending {
         let rel_path = ym.file_path();
-        if manifest.is_phase1_done(&rel_path) {
-            tracing::debug!("Skipping phase 1 for {} (already done)", rel_path);
-            continue;
-        }
-
         let local_path = data_dir.join(&rel_path);
-        if !local_path.exists() {
-            tracing::warn!("File not found: {} — skipping", local_path.display());
-            continue;
-        }
-
-        tracing::info!("Phase 1: {} ({}/{})", rel_path, i + 1, total);
-        let start = std::time::Instant::now();
-
-        // Read and filter comments (blocking I/O)
-        let path = local_path.clone();
-        let comments = tokio::task::spawn_blocking(move || parquet::read_comments(&path))
-            .await??;
-
-        let comment_count = comments.len();
-
-        // Tokenize + count in parallel (CPU-bound)
-        let counter =
-            tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
-                .await?;
-
-        // Extract global counts and write partial file
-        let global_counts = counter.global_counts();
         let partial = partial_path(data_dir, ym);
-        write_partial_counts(&partial, &global_counts)?;
+        let sem = semaphore.clone();
 
-        let elapsed = start.elapsed();
-        tracing::info!(
-            "  Comments: {} | Unique n-grams: {} | Elapsed: {:.1}s",
-            comment_count,
-            global_counts.len(),
-            elapsed.as_secs_f64()
-        );
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            tracing::info!("Phase 1: {} ({}/{})", rel_path, i + 1, pending_total);
+            let start = std::time::Instant::now();
 
+            let path = local_path.clone();
+            let comments = tokio::task::spawn_blocking(move || parquet::read_comments(&path))
+                .await??;
+
+            let comment_count = comments.len();
+
+            let counter =
+                tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
+                    .await?;
+
+            let global_counts = counter.global_counts();
+            write_partial_counts(&partial, &global_counts)?;
+
+            let elapsed = start.elapsed();
+            tracing::info!(
+                "  {} — Comments: {} | Unique n-grams: {} | Elapsed: {:.1}s",
+                rel_path,
+                comment_count,
+                global_counts.len(),
+                elapsed.as_secs_f64()
+            );
+
+            Ok::<String, anyhow::Error>(rel_path)
+        });
+
+        handles.push(handle);
+    }
+
+    // Collect results and update manifest
+    for handle in handles {
+        let rel_path = handle.await??;
         manifest.mark_phase1_done(&rel_path, data_dir)?;
     }
 

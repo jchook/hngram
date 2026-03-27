@@ -194,6 +194,11 @@ impl HnClickHouse {
         &self.tokenizer_version
     }
 
+    /// Verify ClickHouse is reachable
+    pub async fn ping(&self) -> std::result::Result<(), clickhouse::error::Error> {
+        self.client.query("SELECT 1").execute().await
+    }
+
     // ========================================================================
     // Insert Operations (for ingestion)
     // ========================================================================

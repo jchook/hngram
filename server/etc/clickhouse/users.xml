@@ -3,8 +3,11 @@
     <!-- User-level settings per RFC-003 Section 12 -->
     <profiles>
         <default>
-            <!-- Per-query memory limit -->
+            <!-- Per-query memory limit (500MB) -->
             <max_memory_usage>500000000</max_memory_usage>
+
+            <!-- Limit memory for all queries combined (1GB) -->
+            <max_memory_usage_for_all_queries>1000000000</max_memory_usage_for_all_queries>
 
             <!-- Spill to disk for large GROUP BY / ORDER BY -->
             <max_bytes_before_external_group_by>200000000</max_bytes_before_external_group_by>

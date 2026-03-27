@@ -23,6 +23,9 @@ anyhow.workspace = true
 # Date/time (matching hn-clickhouse, NOT chrono)
 time = { version = "0.3", features = ["macros", "parsing", "formatting"] }
 
+# Environment
+dotenvy.workspace = true
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

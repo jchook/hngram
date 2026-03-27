@@ -5,24 +5,11 @@
     <!-- Limit total server memory usage -->
     <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
 
-    <!-- Limit per-query memory (500MB) -->
-    <max_memory_usage>500000000</max_memory_usage>
-
-    <!-- Limit memory for all queries combined (1GB) -->
-    <max_memory_usage_for_all_queries>1000000000</max_memory_usage_for_all_queries>
-
-    <!-- Reduce background merge memory -->
-    <background_pool_size>2</background_pool_size>
-    <background_schedule_pool_size>2</background_schedule_pool_size>
-
     <!-- Limit mark cache (default 5GB is too high) -->
     <mark_cache_size>134217728</mark_cache_size> <!-- 128MB -->
 
     <!-- Limit uncompressed cache -->
     <uncompressed_cache_size>67108864</uncompressed_cache_size> <!-- 64MB -->
-
-    <!-- Limit concurrent queries -->
-    <max_concurrent_queries>20</max_concurrent_queries>
 
     <!-- Logging -->
     <logger>

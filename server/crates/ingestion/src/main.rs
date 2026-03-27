@@ -13,6 +13,7 @@ mod months;
 mod parquet;
 mod vocabulary;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use hn_clickhouse::HnClickHouse;
 use manifest::Manifest;
@@ -86,6 +87,8 @@ fn parse_end(end: &Option<String>) -> anyhow::Result<YearMonth> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -137,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let ch = HnClickHouse::from_env();
+            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
             vocabulary::build_vocabulary_phase(&data_dir, &months, &mut manifest, &ch).await?;
         }
 
@@ -160,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let ch = HnClickHouse::from_env();
+            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
             backfill::backfill_phase(&data_dir, &months, &mut manifest, &ch).await?;
         }
 
