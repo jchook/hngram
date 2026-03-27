@@ -3,11 +3,8 @@
  */
 
 import dayjs from 'dayjs';
-import isoWeek from 'dayjs/plugin/isoWeek';
 import type { Point } from '@/gen';
 import type { EChartsOption } from 'echarts';
-
-dayjs.extend(isoWeek);
 
 // ============================================================================
 // Zero-fill
@@ -46,7 +43,7 @@ export function fillMissingBuckets(
 function alignToBucket(d: dayjs.Dayjs, g: Granularity): dayjs.Dayjs {
   switch (g) {
     case 'day': return d;
-    case 'week': return d.startOf('isoWeek');
+    case 'week': return d.startOf('week');
     case 'month': return d.startOf('month');
     case 'year': return d.startOf('year');
   }
