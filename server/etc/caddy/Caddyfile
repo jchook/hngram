@@ -1,9 +1,22 @@
 {
     # Global options
     admin off
+    order rate_limit before basicauth
 }
 
 :80 {
+    # Rate limit API: 120 requests/min per IP
+    rate_limit {
+        zone api_limit {
+            match {
+                path /api/*
+            }
+            key {remote_host}
+            events 120
+            window 1m
+        }
+    }
+
     # Serve static frontend
     root * /srv
     file_server
