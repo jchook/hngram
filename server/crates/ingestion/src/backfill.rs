@@ -11,7 +11,7 @@ use tokenizer::counter::PruningConfig;
 use tokenizer::TOKENIZER_VERSION;
 
 /// Parse a "YYYY-MM-DD" bucket string into a `time::Date`.
-fn parse_bucket_date(s: &str) -> anyhow::Result<time::Date> {
+pub fn parse_bucket_date(s: &str) -> anyhow::Result<time::Date> {
     let format = format_description!("[year]-[month]-[day]");
     time::Date::parse(s, format).with_context(|| format!("Invalid bucket date: '{}'", s))
 }

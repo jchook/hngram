@@ -12,17 +12,17 @@ use tokenizer::counter::{build_vocabulary, PruningConfig};
 use tokenizer::TOKENIZER_VERSION;
 
 /// Directory for partial count files.
-fn partial_dir(data_dir: &Path) -> PathBuf {
+pub fn partial_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("partial")
 }
 
 /// Path for a partial count file.
-fn partial_path(data_dir: &Path, ym: &YearMonth) -> PathBuf {
+pub fn partial_path(data_dir: &Path, ym: &YearMonth) -> PathBuf {
     partial_dir(data_dir).join(format!("{}.counts", ym))
 }
 
 /// Write partial global counts to a TSV file: n\tngram\tcount\n
-fn write_partial_counts(
+pub fn write_partial_counts(
     path: &Path,
     counts: &HashMap<(u8, String), u64>,
 ) -> anyhow::Result<()> {
@@ -41,7 +41,7 @@ fn write_partial_counts(
 }
 
 /// Read and merge all partial count files into global counts.
-fn merge_partial_counts(
+pub fn merge_partial_counts(
     data_dir: &Path,
     months: &[YearMonth],
 ) -> anyhow::Result<HashMap<(u8, String), u64>> {

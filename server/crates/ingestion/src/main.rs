@@ -2,12 +2,14 @@
 //!
 //! Subcommands:
 //!   download   — fetch Parquet files from HuggingFace
-//!   vocabulary — pass 1: build vocabulary from global counts
-//!   backfill   — pass 2: generate daily aggregates, insert to ClickHouse
+//!   ingest     — single-pass: tokenize, update vocabulary, insert counts
+//!   vocabulary — (legacy) pass 1: build vocabulary from global counts
+//!   backfill   — (legacy) pass 2: generate daily aggregates, insert to ClickHouse
 //!   status     — show manifest state
 
 mod backfill;
 mod download;
+mod ingest;
 mod manifest;
 mod months;
 mod parquet;
@@ -46,6 +48,19 @@ enum Command {
 
     /// Build vocabulary from global n-gram counts (pass 1)
     Vocabulary {
+        /// Directory with downloaded Parquet files
+        #[arg(long, default_value = "./hn-data")]
+        data_dir: PathBuf,
+        /// First month to process (YYYY-MM)
+        #[arg(long, default_value = "2006-10")]
+        start: String,
+        /// Last month to process (YYYY-MM, default: current month)
+        #[arg(long)]
+        end: Option<String>,
+    },
+
+    /// Single-pass ingestion: tokenize, update vocabulary, insert counts
+    Ingest {
         /// Directory with downloaded Parquet files
         #[arg(long, default_value = "./hn-data")]
         data_dir: PathBuf,
@@ -120,6 +135,30 @@ async fn main() -> anyhow::Result<()> {
             download::download(&data_dir, &months).await?;
         }
 
+        Command::Ingest {
+            data_dir,
+            start,
+            end,
+        } => {
+            let start = YearMonth::parse(&start)?;
+            let end = parse_end(&end)?;
+            let months = month_range(start, end);
+
+            let mut manifest = Manifest::load(&data_dir)?;
+            manifest.validate_version()?;
+
+            tracing::info!(
+                "Ingesting {} months ({} to {})",
+                months.len(),
+                start,
+                end
+            );
+
+            let ch = HnClickHouse::from_env();
+            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
+            ingest::ingest(&data_dir, &months, &mut manifest, &ch).await?;
+        }
+
         Command::Vocabulary {
             data_dir,
             start,
@@ -173,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Manifest: {}", data_dir.join("manifest.json").display());
             println!("Tokenizer version: {}", manifest.tokenizer_version);
             println!("Vocabulary built: {}", manifest.vocabulary_built);
+            println!("Ingested files: {}", manifest.ingest_count());
             println!("Phase 1 completed files: {}", manifest.phase1_count());
             println!("Phase 2 completed files: {}", manifest.phase2_count());
         }
