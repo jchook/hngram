@@ -12,13 +12,20 @@ pub struct Comment {
     pub bucket: String,
     /// Raw HTML text of the comment.
     pub text: String,
+    /// Original timestamp in milliseconds since epoch.
+    pub ts_ms: i64,
 }
 
-/// Read a Parquet file and return filtered comments.
-///
-/// Filters: type=2 (comment), deleted=0, dead=0, text not null.
-/// Extracts bucket as UTC date from the `time` column.
+/// Read a Parquet file and return all filtered comments.
 pub fn read_comments(path: &Path) -> anyhow::Result<Vec<Comment>> {
+    read_comments_after(path, 0)
+}
+
+/// Read a Parquet file and return filtered comments with `time > min_ts`.
+///
+/// Filters: type=2 (comment), deleted=0, dead=0, text not null, time > min_ts.
+/// Extracts bucket as UTC date from the `time` column.
+pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comment>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
 
@@ -91,6 +98,12 @@ pub fn read_comments(path: &Path) -> anyhow::Result<Vec<Comment>> {
 
             // Convert timestamp millis to UTC date string
             let ts_ms = time_col.value(i);
+
+            // Watermark filter: skip comments already ingested
+            if ts_ms <= min_ts {
+                continue;
+            }
+
             let bucket = match millis_to_date_string(ts_ms) {
                 Some(s) => s,
                 None => continue,
@@ -99,6 +112,7 @@ pub fn read_comments(path: &Path) -> anyhow::Result<Vec<Comment>> {
             comments.push(Comment {
                 bucket,
                 text: text.to_string(),
+                ts_ms,
             });
         }
     }

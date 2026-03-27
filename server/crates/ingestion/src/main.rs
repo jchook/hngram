@@ -21,6 +21,7 @@ use hn_clickhouse::HnClickHouse;
 use manifest::Manifest;
 use months::{month_range, YearMonth};
 use std::path::PathBuf;
+use time::OffsetDateTime;
 use tokenizer::TOKENIZER_VERSION;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -212,7 +213,15 @@ async fn main() -> anyhow::Result<()> {
             println!("Manifest: {}", data_dir.join("manifest.json").display());
             println!("Tokenizer version: {}", manifest.tokenizer_version);
             println!("Vocabulary built: {}", manifest.vocabulary_built);
-            println!("Ingested files: {}", manifest.ingest_count());
+            if manifest.last_ingested_ts > 0 {
+                let dt = OffsetDateTime::from_unix_timestamp_nanos(
+                    (manifest.last_ingested_ts as i128) * 1_000_000,
+                )
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                println!("Watermark: {} ({})", manifest.last_ingested_ts, dt.date());
+            } else {
+                println!("Watermark: none");
+            }
             println!("Phase 1 completed files: {}", manifest.phase1_count());
             println!("Phase 2 completed files: {}", manifest.phase2_count());
         }

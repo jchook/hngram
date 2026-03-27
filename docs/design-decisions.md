@@ -60,6 +60,14 @@ The API accepts one phrase per request. The frontend makes parallel requests (on
 
 ---
 
+## Watermark-based incremental ingestion
+
+The `ingest` command tracks a single timestamp watermark in the manifest: the timestamp of the newest comment processed. Each run reads parquet files and skips comments with `time <= watermark`, processing only new data. This supports any update cadence — daily, hourly, or monthly — with the same command.
+
+The HN dataset is archived and immutable. Timestamps are monotonic. Data is never corrected retroactively. These properties make a simple watermark sufficient — no checksums, row offsets, or dedup logic needed.
+
+---
+
 ## `time` crate everywhere, never `chrono`
 
 All date/time handling uses the `time` crate. The `clickhouse` crate's serde helpers use `time::Date`. Mixing crates creates conversion friction and subtle bugs.

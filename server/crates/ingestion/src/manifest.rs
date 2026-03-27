@@ -16,15 +16,13 @@ pub struct Manifest {
     phase2_completed: Vec<String>,
     pub vocabulary_built: bool,
     #[serde(default)]
-    ingest_completed: Vec<String>,
+    pub last_ingested_ts: i64,
 
     /// Runtime lookup sets (not serialized).
     #[serde(skip)]
     phase1_set: HashSet<String>,
     #[serde(skip)]
     phase2_set: HashSet<String>,
-    #[serde(skip)]
-    ingest_set: HashSet<String>,
 }
 
 impl Manifest {
@@ -48,7 +46,6 @@ impl Manifest {
         // Build lookup sets from the serialized vecs
         manifest.phase1_set = manifest.phase1_completed.iter().cloned().collect();
         manifest.phase2_set = manifest.phase2_completed.iter().cloned().collect();
-        manifest.ingest_set = manifest.ingest_completed.iter().cloned().collect();
         Ok(manifest)
     }
 
@@ -118,19 +115,8 @@ impl Manifest {
         self.phase2_completed.len()
     }
 
-    pub fn is_ingest_done(&self, path: &str) -> bool {
-        self.ingest_set.contains(path)
-    }
-
-    pub fn mark_ingest_done(&mut self, path: &str, data_dir: &Path) -> anyhow::Result<()> {
-        if self.ingest_set.insert(path.to_string()) {
-            self.ingest_completed.push(path.to_string());
-            self.save(data_dir)?;
-        }
-        Ok(())
-    }
-
-    pub fn ingest_count(&self) -> usize {
-        self.ingest_completed.len()
+    pub fn set_last_ingested_ts(&mut self, ts: i64, data_dir: &Path) -> anyhow::Result<()> {
+        self.last_ingested_ts = ts;
+        self.save(data_dir)
     }
 }

@@ -108,29 +108,43 @@ pub async fn ingest(
     let mut prev_vocab = ch.load_vocabulary().await.unwrap_or_default();
     tracing::info!("Current vocabulary: {} admitted n-grams", prev_vocab.len());
 
-    let mut months_processed = 0u32;
+    let watermark = manifest.last_ingested_ts;
+    let mut max_ts = watermark;
+    let mut total_comments = 0u64;
+
+    if watermark > 0 {
+        let dt = time::OffsetDateTime::from_unix_timestamp_nanos((watermark as i128) * 1_000_000)
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+        tracing::info!("Watermark: {} ({})", watermark, dt.date());
+    }
 
     for (i, ym) in months.iter().enumerate() {
         let rel_path = ym.file_path();
-        if manifest.is_ingest_done(&rel_path) {
-            tracing::debug!("Skipping {} (already ingested)", rel_path);
-            continue;
-        }
-
         let local_path = data_dir.join(&rel_path);
         if !local_path.exists() {
-            tracing::warn!("File not found: {} — skipping", local_path.display());
             continue;
         }
 
-        tracing::info!("Ingesting: {} ({}/{})", rel_path, i + 1, total);
+        // Read only comments after the watermark
+        let path = local_path.clone();
+        let wm = watermark;
+        let comments =
+            tokio::task::spawn_blocking(move || parquet::read_comments_after(&path, wm))
+                .await??;
+
+        if comments.is_empty() {
+            continue;
+        }
+
+        tracing::info!("Ingesting: {} ({}/{}) — {} new comments", rel_path, i + 1, total, comments.len());
         let start = std::time::Instant::now();
 
-        // Step 1: Tokenize (once)
-        let path = local_path.clone();
-        let comments = tokio::task::spawn_blocking(move || parquet::read_comments(&path))
-            .await??;
+        // Track max timestamp
+        if let Some(ts) = comments.iter().map(|c| c.ts_ms).max() {
+            max_ts = max_ts.max(ts);
+        }
         let comment_count = comments.len();
+        total_comments += comment_count as u64;
 
         let counter =
             tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
@@ -231,21 +245,20 @@ pub async fn ingest(
             elapsed.as_secs_f64()
         );
 
-        // Step 8: Update manifest
-        manifest.mark_ingest_done(&rel_path, data_dir)?;
-        months_processed += 1;
     }
 
-    // Save updated snapshot
-    if months_processed > 0 {
+    // Persist state if any new comments were processed
+    if max_ts > watermark {
         save_cumulative_snapshot(data_dir, &global_counts)?;
+        manifest.set_last_ingested_ts(max_ts, data_dir)?;
+        tracing::info!(
+            "Ingestion complete — {} new comments, watermark advanced to {}",
+            total_comments,
+            max_ts
+        );
+    } else {
+        tracing::info!("No new comments found");
     }
-
-    tracing::info!(
-        "Ingestion complete — {} months processed, {} total vocabulary",
-        months_processed,
-        prev_vocab.len()
-    );
 
     Ok(())
 }
