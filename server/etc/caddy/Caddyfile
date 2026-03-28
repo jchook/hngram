@@ -17,21 +17,13 @@
         }
     }
 
-    # Serve static frontend
-    root * /srv
-    file_server
-
     # Proxy API requests to backend (Cache-Control set by API)
     handle /api/* {
         uri strip_prefix /api
         reverse_proxy api:3000
     }
 
-    # Cache static assets (JS/CSS/images) with long TTL + immutable
-    @static path *.js *.css *.png *.jpg *.svg *.woff2 *.ico
-    header @static Cache-Control "public, max-age=31536000, immutable"
-
-    # Also proxy OpenAPI spec and Swagger UI
+    # Proxy OpenAPI spec and Swagger UI
     handle /swagger-ui* {
         reverse_proxy api:3000
     }
@@ -40,8 +32,16 @@
         reverse_proxy api:3000
     }
 
-    # SPA fallback - serve index.html for client-side routing
-    try_files {path} /index.html
+    # Serve static frontend (SPA fallback)
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+
+        # Cache static assets with long TTL + immutable
+        @static path *.js *.css *.png *.jpg *.svg *.woff2 *.ico
+        header @static Cache-Control "public, max-age=31536000, immutable"
+    }
 
     # Compression
     encode gzip

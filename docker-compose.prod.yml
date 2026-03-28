@@ -14,14 +14,16 @@ services:
     restart: unless-stopped
 
   api:
+    init: true
     build:
       context: ./server
       dockerfile: Dockerfile
-    env_file:
-      - path: .env
-        required: false
+    volumes:
+      - ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt:/run/secrets/clickhouse_password:ro
     environment:
       - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_USER=hngram
+      - CLICKHOUSE_PASSWORD_FILE=/run/secrets/clickhouse_password
       - RUST_LOG=warn
     depends_on:
       clickhouse:
@@ -29,12 +31,16 @@ services:
     restart: unless-stopped
 
   clickhouse:
+    init: true
     image: clickhouse/clickhouse-server:24.3-alpine
+    secrets:
+      - clickhouse_password
     volumes:
-      - ./data/clickhouse:/var/lib/clickhouse
+      - ./server/data/clickhouse:/var/lib/clickhouse
       - ./server/etc/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
       - ./server/etc/clickhouse/config.prod.xml:/etc/clickhouse-server/config.d/prod.xml:ro
       - ./server/etc/clickhouse/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
+      - ./server/etc/clickhouse/users.prod.xml:/etc/clickhouse-server/users.d/prod.xml:ro
       - ./server/etc/clickhouse/init:/docker-entrypoint-initdb.d:ro
     environment:
       - CLICKHOUSE_DB=hn_ngram
@@ -44,6 +50,10 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+
+secrets:
+  clickhouse_password:
+    file: ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt
 
 volumes:
   caddy_data:

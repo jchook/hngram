@@ -2,11 +2,41 @@
 <clickhouse>
     <!-- Prod tuning for small VPS (per RFC-003 Section 12) -->
 
-    <!-- Reduce background merge threads -->
+    <!-- Background thread pools: minimal for 1-2 cores -->
     <background_pool_size>2</background_pool_size>
     <background_schedule_pool_size>2</background_schedule_pool_size>
-    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
 
     <!-- Limit concurrent queries -->
-    <max_concurrent_queries>20</max_concurrent_queries>
+    <max_concurrent_queries>10</max_concurrent_queries>
+
+    <!-- Disable system log tables that consume memory and disk -->
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <query_views_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+
+    <!-- Keep query_log with short TTL for debugging -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+
+    <!--
+      MergeTree settings must go here, not at top level.
+      Constraint: number_of_free_entries_* < background_pool_size * concurrency_ratio (2*2=4)
+    -->
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+        <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool> <!-- 1GB, default 150GB -->
+        <min_bytes_for_wide_part>10485760</min_bytes_for_wide_part>  <!-- 10MB -->
+        <min_rows_for_wide_part>100000</min_rows_for_wide_part>
+    </merge_tree>
 </clickhouse>

@@ -1,7 +1,7 @@
 # Build stage
 FROM rust:1-alpine AS builder
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev g++ pkgconf openssl-dev openssl-libs-static curl
 
 WORKDIR /app
 
@@ -34,7 +34,8 @@ RUN touch crates/tokenizer/src/lib.rs crates/clickhouse/src/lib.rs \
 
 # Runtime stage
 FROM alpine:3
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && adduser -D -u 1000 app
 COPY --from=builder /app/target/release/api /app/api
+USER 1000:1000
 EXPOSE 3000
 CMD ["/app/api"]

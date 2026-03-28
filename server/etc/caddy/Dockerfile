@@ -1,10 +1,10 @@
 # Build frontend with Bun
-FROM oven/bun:1 AS builder
+FROM oven/bun:1.3.3 AS builder
 
 WORKDIR /app
 
 # Copy client package files
-COPY client/package.json client/bun.lockb* ./
+COPY client/package.json client/bun.lock* ./
 
 # Install dependencies
 RUN bun install --frozen-lockfile

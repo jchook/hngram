@@ -66,7 +66,7 @@ cargo run -p ingestion -- status                      # Check progress
 # Use --start 2024-01 --end 2024-03 to process a subset
 ```
 
-Both commands are safe to re-run. Vocabulary generates partial counts only for new months, then re-merges all partials and updates admissions. Backfill skips months already processed. State is tracked in `hn-data/manifest.json`.
+Both commands are safe to re-run. Vocabulary generates partial counts only for new months, then re-merges all partials and updates admissions. Backfill skips months already processed. State is tracked in `data/hn/manifest.json`.
 
 Data is append-only — vocabulary and counts only grow, never shrink or get reprocessed.
 
@@ -90,11 +90,11 @@ All Rust entry points load `.env` via `dotenvy`. Key variables:
 # Dev: ClickHouse in Docker, everything else local
 docker compose up -d
 
-# Prod: Caddy + API + ClickHouse, all in Docker
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Prod: Caddy + API + ClickHouse, all in Docker (standalone file, not merged with dev)
+docker compose -f docker-compose.prod.yml up -d
 ```
 
-Prod adds `config.prod.xml` with memory/pool limits for small VPS.
+Prod is a standalone compose file with its own ClickHouse config (`config.prod.xml` for memory/pool limits, `users.prod.xml` for auth). Secrets are mounted from the host via Docker Compose secrets (see `docs/RFC-011-production-security.md`).
 
 ## Gotchas
 
@@ -151,7 +151,7 @@ Defined in: `server/crates/tokenizer/src/lib.rs`
 | API server startup | `server/crates/api/src/main.rs` |
 | OpenAPI generator | `server/crates/api/src/bin/generate_openapi.rs` |
 | Ingestion pipeline | `server/crates/ingestion/src/` |
-| Ingestion manifest | `server/hn-data/manifest.json` |
+| Ingestion manifest | `server/data/hn/manifest.json` |
 | Frontend app | `client/src/App.tsx` |
 | URL state management | `client/src/features/query/useQueryState.ts` |
 | Data transforms | `client/src/features/chart/transforms.ts` |

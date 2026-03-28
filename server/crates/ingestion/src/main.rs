@@ -37,7 +37,7 @@ enum Command {
     /// Download Parquet files from HuggingFace
     Download {
         /// Local storage directory
-        #[arg(long, default_value = "./hn-data")]
+        #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
         /// First month to download (YYYY-MM)
         #[arg(long, default_value = "2006-10")]
@@ -50,7 +50,7 @@ enum Command {
     /// Build vocabulary from global n-gram counts (pass 1)
     Vocabulary {
         /// Directory with downloaded Parquet files
-        #[arg(long, default_value = "./hn-data")]
+        #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
         /// First month to process (YYYY-MM)
         #[arg(long, default_value = "2006-10")]
@@ -63,7 +63,7 @@ enum Command {
     /// Single-pass ingestion: tokenize, update vocabulary, insert counts
     Ingest {
         /// Directory with downloaded Parquet files
-        #[arg(long, default_value = "./hn-data")]
+        #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
         /// First month to process (YYYY-MM)
         #[arg(long, default_value = "2006-10")]
@@ -76,7 +76,7 @@ enum Command {
     /// Generate daily aggregates and insert into ClickHouse (pass 2)
     Backfill {
         /// Directory with downloaded Parquet files
-        #[arg(long, default_value = "./hn-data")]
+        #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
         /// First month to process (YYYY-MM)
         #[arg(long, default_value = "2006-10")]
@@ -89,7 +89,7 @@ enum Command {
     /// Show current manifest state
     Status {
         /// Data directory
-        #[arg(long, default_value = "./hn-data")]
+        #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
     },
 }

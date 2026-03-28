@@ -5,7 +5,7 @@ services:
     ports:
       - "8123:8123"
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - ./server/data/clickhouse:/var/lib/clickhouse
       - ./server/etc/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
       - ./server/etc/clickhouse/users.xml:/etc/clickhouse-server/users.d/custom.xml:ro
       - ./server/etc/clickhouse/init:/docker-entrypoint-initdb.d:ro
@@ -16,6 +16,3 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-volumes:
-  clickhouse_data:

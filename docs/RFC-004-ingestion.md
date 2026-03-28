@@ -183,7 +183,7 @@ Files are stored at:
 {data-dir}/data/YYYY/YYYY-MM.parquet
 ```
 
-Default `data-dir`: `./hn-data/` (relative to working directory)
+Default `data-dir`: `./data/hn/` (relative to working directory)
 
 ### File listing
 
@@ -704,7 +704,7 @@ Download Parquet files from HuggingFace.
 ingestion download [OPTIONS]
 
 Options:
-  --data-dir <PATH>    Local storage directory [default: ./hn-data]
+  --data-dir <PATH>    Local storage directory [default: ./data/hn]
   --start <YYYY-MM>    First month to download [default: 2006-10]
   --end <YYYY-MM>      Last month to download [default: current month]
 ```
@@ -717,7 +717,7 @@ Run pass 1: build vocabulary from global counts.
 ingestion vocabulary [OPTIONS]
 
 Options:
-  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./hn-data]
+  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
   --start <YYYY-MM>    First month to process [default: 2006-10]
   --end <YYYY-MM>      Last month to process [default: current month]
 ```
@@ -732,7 +732,7 @@ Requires vocabulary to be built first.
 ingestion backfill [OPTIONS]
 
 Options:
-  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./hn-data]
+  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
   --start <YYYY-MM>    First month to process [default: 2006-10]
   --end <YYYY-MM>      Last month to process [default: current month]
 ```
@@ -755,7 +755,7 @@ Show current state of the manifest.
 ingestion status [OPTIONS]
 
 Options:
-  --data-dir <PATH>    [default: ./hn-data]
+  --data-dir <PATH>    [default: ./data/hn]
 ```
 
 ---

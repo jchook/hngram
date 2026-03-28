@@ -3,15 +3,22 @@
     <!-- User-level settings per RFC-003 Section 12 -->
     <profiles>
         <default>
-            <!-- Per-query memory limit (500MB) -->
-            <max_memory_usage>500000000</max_memory_usage>
+            <!-- Per-query memory limit -->
+            <max_memory_usage>500000000</max_memory_usage> <!-- 500MB -->
 
-            <!-- Limit memory for all queries combined (1GB) -->
-            <max_memory_usage_for_all_queries>1000000000</max_memory_usage_for_all_queries>
+            <!-- Total memory for all concurrent queries -->
+            <max_memory_usage_for_all_queries>800000000</max_memory_usage_for_all_queries> <!-- 800MB -->
 
-            <!-- Spill to disk for large GROUP BY / ORDER BY -->
+            <!-- Spill to disk for large aggregations/sorts -->
             <max_bytes_before_external_group_by>200000000</max_bytes_before_external_group_by>
             <max_bytes_before_external_sort>200000000</max_bytes_before_external_sort>
+
+            <!-- Limit threads per query on small VPS -->
+            <max_threads>2</max_threads>
+
+            <!-- Disable parallel parsing/formatting to save memory -->
+            <input_format_parallel_parsing>0</input_format_parallel_parsing>
+            <output_format_parallel_formatting>0</output_format_parallel_formatting>
         </default>
     </profiles>
 

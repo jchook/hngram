@@ -142,6 +142,20 @@ pub struct HnClickHouse {
 }
 
 impl HnClickHouse {
+    /// Read a secret from a file path (Docker secrets pattern).
+    /// Checks `{name}_FILE` env var first; if set, reads the file at that path.
+    /// Falls back to `{name}` env var, then to the provided default.
+    fn read_secret(name: &str, default: &str) -> String {
+        let file_key = format!("{}_FILE", name);
+        if let Ok(path) = std::env::var(&file_key) {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => return contents.trim().to_string(),
+                Err(e) => panic!("Failed to read secret from {} ({}): {}", file_key, path, e),
+            }
+        }
+        std::env::var(name).unwrap_or_else(|_| default.to_string())
+    }
+
     /// Create a new client from environment variables or defaults
     pub fn from_env() -> Self {
         let host = std::env::var("CLICKHOUSE_HOST").unwrap_or_else(|_| "localhost".into());
@@ -158,7 +172,7 @@ impl HnClickHouse {
         };
 
         let user = std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
-        let password = std::env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
+        let password = Self::read_secret("CLICKHOUSE_PASSWORD", "");
         let database = std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| DATABASE.into());
 
         let url = format!("http://{}:{}", host, port);

@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- Production user configuration (RFC-011)
+         The hngram API user is created by init/002-users.sh on first startup.
+         This file only restricts the default user to localhost. -->
+
+    <users>
+        <default>
+            <networks replace="1">
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+        </default>
+    </users>
+</clickhouse>
