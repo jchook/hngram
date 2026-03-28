@@ -1,8 +1,13 @@
+set positional-arguments
+
+ingest *args="download":
+  cargo run -p ingestion -- "$@"
+
 up:
-    watchexec -r -w crates -- cargo run -p api --bin api
+  watchexec -r -w crates -- cargo run -p api --bin api
 
 test:
-    cargo test
+  cargo test
 
 openapi:
-    cargo run -p api --bin generate_openapi > openapi.json
+  cargo run -p api --bin generate_openapi > openapi.json
