@@ -1,6 +1,5 @@
 //! Vocabulary utilities: partial count file I/O and k-way sorted merge.
 
-use crate::months::YearMonth;
 use anyhow::Context;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -10,11 +9,6 @@ use std::path::{Path, PathBuf};
 /// Directory for partial count files.
 pub fn partial_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("partial")
-}
-
-/// Path for a partial count file.
-pub fn partial_path(data_dir: &Path, ym: &YearMonth) -> PathBuf {
-    partial_dir(data_dir).join(format!("{}.counts", ym))
 }
 
 /// Write partial global counts to a sorted TSV file: n\tngram\tcount\n
@@ -42,6 +36,75 @@ pub fn write_partial_counts(
     Ok(())
 }
 
+/// Discover all .counts files in the partial directory (recursively, sorted).
+pub fn find_partial_files(data_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let dir = partial_dir(data_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    collect_counts_files(&dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_counts_files(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_counts_files(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("counts") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Find the next available partial file number in the partial directory.
+/// Scans once and returns a counter starting after the highest existing number.
+pub fn next_partial_counter(data_dir: &Path) -> u32 {
+    let dir = partial_dir(data_dir);
+    if !dir.exists() {
+        return 0;
+    }
+    let mut max_num: u32 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                if let Ok(num) = stem.parse::<u32>() {
+                    max_num = max_num.max(num + 1);
+                }
+            }
+        }
+    }
+    max_num
+}
+
+/// Build the path for a numbered partial file.
+pub fn numbered_partial_path(data_dir: &Path, index: u32) -> PathBuf {
+    partial_dir(data_dir).join(format!("{:04}.counts", index))
+}
+
+/// Check if pass 1 completed successfully (atomic marker exists).
+pub fn is_pass1_complete(data_dir: &Path) -> bool {
+    partial_dir(data_dir).join(".complete").exists()
+}
+
+/// Mark pass 1 as complete (atomic write).
+pub fn mark_pass1_complete(data_dir: &Path) -> anyhow::Result<()> {
+    let marker = partial_dir(data_dir).join(".complete");
+    let tmp = marker.with_extension("complete.tmp");
+    std::fs::write(&tmp, "done")?;
+    std::fs::rename(&tmp, &marker)?;
+    Ok(())
+}
+
+// ============================================================================
+// K-way sorted merge
+// ============================================================================
+
 /// An entry from a partial count file, used in the merge heap.
 #[derive(Eq, PartialEq)]
 struct HeapEntry {
@@ -65,7 +128,6 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-/// Parse one TSV line into (n, ngram, count). Returns None on invalid lines.
 fn parse_line(line: &str) -> Option<(u8, String, u64)> {
     let parts: Vec<&str> = line.splitn(3, '\t').collect();
     if parts.len() != 3 {
@@ -81,7 +143,6 @@ fn parse_line(line: &str) -> Option<(u8, String, u64)> {
     }
 }
 
-/// Read the next valid entry from a buffered reader.
 fn read_next(
     reader: &mut std::io::BufReader<std::fs::File>,
     buf: &mut String,
@@ -90,12 +151,11 @@ fn read_next(
         buf.clear();
         let bytes = reader.read_line(buf)?;
         if bytes == 0 {
-            return Ok(None); // EOF
+            return Ok(None);
         }
         if let Some(entry) = parse_line(buf.trim_end()) {
             return Ok(Some(entry));
         }
-        // Skip invalid lines
     }
 }
 
@@ -106,37 +166,29 @@ pub struct MergedEntry {
     pub count: u64,
 }
 
-/// K-way merge of sorted partial count files. Calls `callback` for each unique
-/// (n, ngram) with its summed count across all files. Memory usage is O(num_files)
-/// — one buffered line per open file, plus the heap.
+/// K-way merge of all sorted partial count files in the partial directory.
+/// Discovers files via glob, opens them sorted, and streams merged results
+/// to the callback. Memory usage is O(num_files).
 pub fn merge_partial_counts_streaming<F>(
     data_dir: &Path,
-    months: &[YearMonth],
     mut callback: F,
 ) -> anyhow::Result<()>
 where
     F: FnMut(MergedEntry) -> anyhow::Result<()>,
 {
-    let total = months.len();
+    let paths = find_partial_files(data_dir)?;
+    if paths.is_empty() {
+        tracing::warn!("No partial count files found");
+        return Ok(());
+    }
 
     // Open all partial files and seed the heap
     let mut readers: Vec<std::io::BufReader<std::fs::File>> = Vec::new();
     let mut heap: BinaryHeap<Reverse<HeapEntry>> = BinaryHeap::new();
     let mut bufs: Vec<String> = Vec::new();
-    let mut opened = 0usize;
 
-    for (i, ym) in months.iter().enumerate() {
-        let path = partial_path(data_dir, ym);
-        if !path.exists() {
-            // Push a placeholder to keep indices aligned
-            readers.push(std::io::BufReader::new(
-                std::fs::File::open("/dev/null").unwrap(),
-            ));
-            bufs.push(String::new());
-            continue;
-        }
-
-        let file = std::fs::File::open(&path)
+    for (i, path) in paths.iter().enumerate() {
+        let file = std::fs::File::open(path)
             .with_context(|| format!("Failed to open {}", path.display()))?;
         let mut reader = std::io::BufReader::new(file);
         let mut buf = String::new();
@@ -152,18 +204,12 @@ where
 
         readers.push(reader);
         bufs.push(buf);
-        opened += 1;
     }
 
-    tracing::info!(
-        "Streaming merge of {} partial files (of {} months)",
-        opened,
-        total,
-    );
+    tracing::info!("Streaming merge of {} partial files", paths.len());
 
     let mut merged_count = 0u64;
 
-    // K-way merge: pop smallest key, accumulate all entries with same key, emit
     while let Some(Reverse(entry)) = heap.pop() {
         let current_n = entry.n;
         let current_ngram = entry.ngram;
@@ -191,7 +237,6 @@ where
 
             heap.pop();
 
-            // Advance that file
             if let Some((n, ngram, count)) =
                 read_next(&mut readers[file_idx], &mut bufs[file_idx])?
             {
@@ -219,4 +264,3 @@ where
     tracing::info!("Merge complete — {} unique n-grams", merged_count);
     Ok(())
 }
-

@@ -23,6 +23,24 @@ pub enum OutputMode {
     Parquet,
 }
 
+/// Configuration for the process command.
+pub struct ProcessConfig {
+    /// Flush threshold for accumulator cardinality in pass 1.
+    /// This is a threshold, not a hard cap — the accumulator retains capacity after flush.
+    pub max_ngrams: usize,
+    /// Number of concurrent file-processing workers.
+    pub producer_count: usize,
+}
+
+impl Default for ProcessConfig {
+    fn default() -> Self {
+        Self {
+            max_ngrams: 10_000_000,
+            producer_count: 2,
+        }
+    }
+}
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -34,13 +52,14 @@ pub async fn process(
     end: &YearMonth,
     mode: OutputMode,
     ch: Option<&HnClickHouse>,
+    config: &ProcessConfig,
 ) -> anyhow::Result<()> {
     match mode {
         OutputMode::ClickHouse => {
             let ch = ch.expect("ClickHouse connection required for clickhouse output mode");
             process_clickhouse(data_dir, months, start, end, ch).await
         }
-        OutputMode::Parquet => process_parquet(data_dir, months, start, end).await,
+        OutputMode::Parquet => process_parquet(data_dir, months, start, end, config).await,
     }
 }
 
@@ -134,10 +153,6 @@ async fn process_clickhouse(
         for ((n, ngram), count) in &month_globals {
             *global_counts.entry((*n, ngram.clone())).or_insert(0) += count;
         }
-
-        // Write partial TSV (for recovery)
-        let partial = vocabulary::partial_path(data_dir, ym);
-        vocabulary::write_partial_counts(&partial, &month_globals)?;
 
         // Rebuild vocabulary from updated global counts
         let vocabulary = build_vocabulary(&global_counts, &config);
@@ -281,6 +296,7 @@ async fn process_parquet(
     months: &[YearMonth],
     start: &YearMonth,
     end: &YearMonth,
+    proc_config: &ProcessConfig,
 ) -> anyhow::Result<()> {
     let config = PruningConfig::from_env();
     let tv = TOKENIZER_VERSION.to_string();
@@ -295,76 +311,125 @@ async fn process_parquet(
     std::fs::create_dir_all(&output_dir)?;
 
     // ================================================================
-    // Pass 1: Build vocabulary from global counts (concurrent)
-    // Skip files that already have partial counts, except re-process
-    // the last one in case it was corrupted by a crash.
+    // Pass 1: Build vocabulary from global counts
+    // Producers stream row-group-level counts through a bounded channel.
+    // Consumer accumulates and flushes to sorted partial files at threshold.
     // ================================================================
-    tracing::info!("Pass 1: Building vocabulary from {} files", total);
 
-    // Limit concurrent files to 2: enough to overlap I/O with CPU,
-    // but bounded memory (each file's NgramCounter is ~1-2 GB for large months).
-    // Rayon already parallelizes tokenization within each file across all cores.
-    let file_concurrency = 2;
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(file_concurrency));
+    if vocabulary::is_pass1_complete(data_dir) {
+        tracing::info!("Pass 1: already complete (found .complete marker), skipping to merge");
+    } else {
+        tracing::info!(
+            "Pass 1: Building vocabulary from {} files (max_ngrams={}, producers={})",
+            total,
+            proc_config.max_ngrams,
+            proc_config.producer_count,
+        );
 
-    let mut handles = Vec::new();
-    let mut skipped = 0usize;
-    for (i, ym) in months.iter().enumerate() {
-        let rel_path = ym.file_path();
-        let local_path = data_dir.join(&rel_path);
-        if !local_path.exists() {
-            tracing::warn!("File not found: {} — skipping", local_path.display());
-            continue;
+        // Clean partial directory for fresh run
+        let partial_dir = vocabulary::partial_dir(data_dir);
+        if partial_dir.exists() {
+            std::fs::remove_dir_all(&partial_dir)?;
+        }
+        std::fs::create_dir_all(&partial_dir)?;
+
+        // Bounded channel: capacity 1 for tight backpressure
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<std::collections::HashMap<(u8, String), u64>>(1);
+
+        // Spawn producers (bounded by semaphore)
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(proc_config.producer_count));
+
+        // Collect source file paths
+        let source_files: Vec<(usize, String, std::path::PathBuf)> = months
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ym)| {
+                let rel_path = ym.file_path();
+                let local_path = data_dir.join(&rel_path);
+                if local_path.exists() {
+                    Some((i, rel_path, local_path))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let file_count = source_files.len();
+
+        for (i, rel_path, local_path) in source_files {
+            let tx = tx.clone();
+            let sem = sem.clone();
+
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                tracing::info!("Pass 1: {} ({}/{})", rel_path, i + 1, total);
+
+                let path = local_path;
+                // Stream row-group-level global counts through channel.
+                // tx is moved into the blocking closure — each producer owns its clone.
+                let result = tokio::task::spawn_blocking(move || {
+                    parquet::stream_global_counts(&path, 0, |batch_globals| {
+                        tx.blocking_send(batch_globals)
+                            .map_err(|_| anyhow::anyhow!("Consumer dropped"))
+                    })
+                })
+                .await;
+
+                if let Err(e) = result {
+                    tracing::error!("Producer failed for {}: {}", rel_path, e);
+                } else if let Ok(Err(e)) = result {
+                    tracing::error!("Producer failed for {}: {}", rel_path, e);
+                }
+            });
+        }
+        drop(tx); // Close sender so consumer knows when all producers are done
+
+        // Consumer: accumulate global counts and flush at cardinality threshold
+        let mut accumulator: std::collections::HashMap<(u8, String), u64> =
+            std::collections::HashMap::new();
+        let mut partial_counter = vocabulary::next_partial_counter(data_dir);
+        let mut flush_count = 0u32;
+
+        while let Some(batch_globals) = rx.recv().await {
+            // Merge batch into accumulator, checking threshold during merge
+            for ((n, ngram), count) in batch_globals {
+                *accumulator.entry((n, ngram)).or_insert(0) += count;
+
+                // Check flush threshold during merge to limit overshoot
+                if accumulator.len() >= proc_config.max_ngrams {
+                    let path = vocabulary::numbered_partial_path(data_dir, partial_counter);
+                    vocabulary::write_partial_counts(&path, &accumulator)?;
+                    tracing::info!(
+                        "  Flushed partial {} ({} entries)",
+                        partial_counter,
+                        accumulator.len()
+                    );
+                    accumulator.clear(); // Retains capacity for hot reuse
+                    partial_counter += 1;
+                    flush_count += 1;
+                }
+            }
         }
 
-        let partial = vocabulary::partial_path(data_dir, ym);
-
-        // Skip if partial already exists (delete manually to reprocess)
-        if partial.exists() {
-            skipped += 1;
-            continue;
-        }
-
-        let sem = semaphore.clone();
-        let idx = i + 1;
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            tracing::info!("Pass 1: {} ({}/{})", rel_path, idx, total);
-            let file_start = std::time::Instant::now();
-
-            let path = local_path.clone();
-            let comments =
-                tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await??;
-            let comment_count = comments.len();
-
-            let counter =
-                tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
-                    .await?;
-
-            let month_globals = counter.global_counts();
-            vocabulary::write_partial_counts(&partial, &month_globals)?;
-
+        // Flush remaining accumulator
+        if !accumulator.is_empty() {
+            let path = vocabulary::numbered_partial_path(data_dir, partial_counter);
+            vocabulary::write_partial_counts(&path, &accumulator)?;
             tracing::info!(
-                "  {} — Comments: {} | Unique n-grams: {} | Elapsed: {:.1}s",
-                rel_path,
-                comment_count,
-                month_globals.len(),
-                file_start.elapsed().as_secs_f64()
+                "  Flushed final partial {} ({} entries)",
+                partial_counter,
+                accumulator.len()
             );
+            flush_count += 1;
+        }
 
-            Ok::<(), anyhow::Error>(())
-        });
-
-        handles.push(handle);
-    }
-
-    if skipped > 0 {
-        tracing::info!("Skipped {} files with existing partials", skipped);
-    }
-
-    for handle in handles {
-        handle.await??;
+        vocabulary::mark_pass1_complete(data_dir)?;
+        tracing::info!(
+            "Pass 1 complete — {} files processed, {} partial files written",
+            file_count,
+            flush_count,
+        );
     }
 
     // Merge partials, build vocabulary, and write global_counts.parquet
@@ -386,7 +451,7 @@ async fn process_parquet(
     let mut total_trigrams = 0u64;
     let mut total_gc_rows = 0u64;
 
-    vocabulary::merge_partial_counts_streaming(data_dir, months, |entry| {
+    vocabulary::merge_partial_counts_streaming(data_dir, |entry| {
         // Write every entry to global_counts.parquet
         gc_writer.write_one(&GlobalCountRow {
             tokenizer_version: tv.clone(),
@@ -462,10 +527,10 @@ async fn process_parquet(
         elapsed_secs: f64,
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Pass2Result>(file_concurrency);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Pass2Result>(proc_config.producer_count);
 
     // Spawn producers
-    let producer_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(file_concurrency));
+    let producer_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(proc_config.producer_count));
     for ym in months.iter() {
         let rel_path = ym.file_path();
         let local_path = data_dir.join(&rel_path);

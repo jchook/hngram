@@ -40,99 +40,7 @@ pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comme
 
     for batch_result in reader {
         let batch = batch_result?;
-        let num_rows = batch.num_rows();
-
-        // Extract columns by name
-        let type_col = batch
-            .column_by_name("type")
-            .and_then(|c| c.as_any().downcast_ref::<Int8Array>())
-            .context("Missing or invalid 'type' column")?;
-
-        let deleted_col = batch
-            .column_by_name("deleted")
-            .and_then(|c| c.as_any().downcast_ref::<UInt8Array>())
-            .context("Missing or invalid 'deleted' column")?;
-
-        let dead_col = batch
-            .column_by_name("dead")
-            .and_then(|c| c.as_any().downcast_ref::<UInt8Array>())
-            .context("Missing or invalid 'dead' column")?;
-
-        let text_col = batch
-            .column_by_name("text")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .context("Missing or invalid 'text' column")?;
-
-        // Handle both millisecond and microsecond timestamp columns —
-        // older HuggingFace files use ms, newer ones use us.
-        let time_col_raw = batch
-            .column_by_name("time")
-            .context("Missing 'time' column")?;
-        let time_ms_col = time_col_raw
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>();
-        let time_us_col = time_col_raw
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>();
-        if time_ms_col.is_none() && time_us_col.is_none() {
-            anyhow::bail!(
-                "'time' column has type {:?}, expected Timestamp(Millisecond) or Timestamp(Microsecond)",
-                time_col_raw.data_type()
-            );
-        }
-
-        for i in 0..num_rows {
-            // Filter: type = 2 (comment)
-            if type_col.is_null(i) || type_col.value(i) != 2 {
-                continue;
-            }
-            // Filter: deleted = 0
-            if deleted_col.is_null(i) || deleted_col.value(i) != 0 {
-                continue;
-            }
-            // Filter: dead = 0
-            if dead_col.is_null(i) || dead_col.value(i) != 0 {
-                continue;
-            }
-            // Filter: text not null
-            if text_col.is_null(i) {
-                continue;
-            }
-            // Filter: time not null
-            if time_col_raw.is_null(i) {
-                continue;
-            }
-
-            let text = text_col.value(i);
-            if text.is_empty() {
-                continue;
-            }
-
-            // Extract timestamp as millis, handling both ms and us columns
-            let ts_ms = if let Some(col) = time_us_col {
-                col.value(i) / 1000
-            } else if let Some(col) = time_ms_col {
-                col.value(i)
-            } else {
-                continue;
-            };
-
-            // Watermark filter: skip comments already ingested
-            if ts_ms <= min_ts {
-                continue;
-            }
-
-            let bucket = match millis_to_date_string(ts_ms) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            comments.push(Comment {
-                bucket,
-                text: text.to_string(),
-                ts_ms,
-            });
-        }
+        comments.extend(extract_comments_from_batch(&batch, min_ts)?);
     }
 
     Ok(comments)
@@ -151,6 +59,122 @@ fn millis_to_date_string(ms: i64) -> Option<String> {
         date.month() as u8,
         date.day()
     ))
+}
+
+/// Stream global counts from a Parquet file, one batch at a time.
+/// Calls `on_batch` with each batch's global counts HashMap.
+/// Memory per batch: one NgramCounter for ~8192 rows (a few MB).
+pub fn stream_global_counts<F>(path: &Path, min_ts: i64, mut on_batch: F) -> anyhow::Result<()>
+where
+    F: FnMut(std::collections::HashMap<(u8, String), u64>) -> anyhow::Result<()>,
+{
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("Failed to read Parquet metadata from {}", path.display()))?
+        .with_batch_size(8192);
+
+    let reader = builder.build()?;
+
+    for batch_result in reader {
+        let batch = batch_result?;
+        let comments = extract_comments_from_batch(&batch, min_ts)?;
+        if comments.is_empty() {
+            continue;
+        }
+
+        let counter = process_comments_parallel(&comments);
+        let globals = counter.global_counts();
+        if !globals.is_empty() {
+            on_batch(globals)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract filtered comments from a single Arrow record batch.
+fn extract_comments_from_batch(
+    batch: &arrow::record_batch::RecordBatch,
+    min_ts: i64,
+) -> anyhow::Result<Vec<Comment>> {
+    let num_rows = batch.num_rows();
+
+    let type_col = batch
+        .column_by_name("type")
+        .and_then(|c| c.as_any().downcast_ref::<Int8Array>())
+        .context("Missing or invalid 'type' column")?;
+    let deleted_col = batch
+        .column_by_name("deleted")
+        .and_then(|c| c.as_any().downcast_ref::<UInt8Array>())
+        .context("Missing or invalid 'deleted' column")?;
+    let dead_col = batch
+        .column_by_name("dead")
+        .and_then(|c| c.as_any().downcast_ref::<UInt8Array>())
+        .context("Missing or invalid 'dead' column")?;
+    let text_col = batch
+        .column_by_name("text")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .context("Missing or invalid 'text' column")?;
+    let time_col_raw = batch
+        .column_by_name("time")
+        .context("Missing 'time' column")?;
+    let time_ms_col = time_col_raw
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>();
+    let time_us_col = time_col_raw
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>();
+    if time_ms_col.is_none() && time_us_col.is_none() {
+        anyhow::bail!(
+            "'time' column has type {:?}, expected Timestamp(Millisecond) or Timestamp(Microsecond)",
+            time_col_raw.data_type()
+        );
+    }
+
+    let mut comments = Vec::new();
+    for i in 0..num_rows {
+        if type_col.is_null(i) || type_col.value(i) != 2 {
+            continue;
+        }
+        if deleted_col.is_null(i) || deleted_col.value(i) != 0 {
+            continue;
+        }
+        if dead_col.is_null(i) || dead_col.value(i) != 0 {
+            continue;
+        }
+        if text_col.is_null(i) {
+            continue;
+        }
+        if time_col_raw.is_null(i) {
+            continue;
+        }
+        let text = text_col.value(i);
+        if text.is_empty() {
+            continue;
+        }
+        let ts_ms = if let Some(col) = time_us_col {
+            col.value(i) / 1000
+        } else if let Some(col) = time_ms_col {
+            col.value(i)
+        } else {
+            continue;
+        };
+        if ts_ms <= min_ts {
+            continue;
+        }
+        let bucket = match millis_to_date_string(ts_ms) {
+            Some(s) => s,
+            None => continue,
+        };
+        comments.push(Comment {
+            bucket,
+            text: text.to_string(),
+            ts_ms,
+        });
+    }
+    Ok(comments)
 }
 
 /// Process comments in parallel using rayon, returning a merged NgramCounter.

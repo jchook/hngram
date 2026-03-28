@@ -57,6 +57,12 @@ enum Command {
         /// Output mode: "clickhouse" (default) or "parquet"
         #[arg(long, default_value = "clickhouse")]
         output: OutputArg,
+        /// Flush threshold for accumulator cardinality in pass 1 (parquet mode)
+        #[arg(long, default_value = "10000000")]
+        max_ngrams: usize,
+        /// Concurrent file processing workers
+        #[arg(long, default_value = "2")]
+        producer_count: usize,
     },
 
     /// Load Parquet output into ClickHouse with atomic table swap
@@ -120,6 +126,8 @@ async fn main() -> anyhow::Result<()> {
             start,
             end,
             output,
+            max_ngrams,
+            producer_count,
         } => {
             let start = YearMonth::parse(&start)?;
             let end = parse_end(&end)?;
@@ -148,7 +156,12 @@ async fn main() -> anyhow::Result<()> {
                 mode,
             );
 
-            process::process(&data_dir, &months, &start, &end, mode, ch.as_ref()).await?;
+            let proc_config = process::ProcessConfig {
+                max_ngrams,
+                producer_count,
+            };
+            process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)
+                .await?;
         }
 
         Command::Import { data_dir } => {
