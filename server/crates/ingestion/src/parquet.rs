@@ -1,7 +1,9 @@
 //! Parquet reading, row filtering, and parallel processing (RFC-004 §2, §6).
 
 use anyhow::Context;
-use arrow::array::{Array, Int8Array, StringArray, TimestampMillisecondArray, UInt8Array};
+use arrow::array::{
+    Array, Int8Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray, UInt8Array,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::path::Path;
 use tokenizer::counter::NgramCounter;
@@ -61,13 +63,23 @@ pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comme
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .context("Missing or invalid 'text' column")?;
 
-        let time_col = batch
+        // Handle both millisecond and microsecond timestamp columns —
+        // older HuggingFace files use ms, newer ones use us.
+        let time_col_raw = batch
             .column_by_name("time")
             .context("Missing 'time' column")?;
-        let time_col = time_col
+        let time_ms_col = time_col_raw
             .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .context("'time' column is not TimestampMillisecond")?;
+            .downcast_ref::<TimestampMillisecondArray>();
+        let time_us_col = time_col_raw
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>();
+        if time_ms_col.is_none() && time_us_col.is_none() {
+            anyhow::bail!(
+                "'time' column has type {:?}, expected Timestamp(Millisecond) or Timestamp(Microsecond)",
+                time_col_raw.data_type()
+            );
+        }
 
         for i in 0..num_rows {
             // Filter: type = 2 (comment)
@@ -87,7 +99,7 @@ pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comme
                 continue;
             }
             // Filter: time not null
-            if time_col.is_null(i) {
+            if time_col_raw.is_null(i) {
                 continue;
             }
 
@@ -96,8 +108,14 @@ pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comme
                 continue;
             }
 
-            // Convert timestamp millis to UTC date string
-            let ts_ms = time_col.value(i);
+            // Extract timestamp as millis, handling both ms and us columns
+            let ts_ms = if let Some(col) = time_us_col {
+                col.value(i) / 1000
+            } else if let Some(col) = time_ms_col {
+                col.value(i)
+            } else {
+                continue;
+            };
 
             // Watermark filter: skip comments already ingested
             if ts_ms <= min_ts {

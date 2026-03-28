@@ -398,18 +398,19 @@ After processing all rows in a Parquet file:
   ngram_counts.parquet
   bucket_totals.parquet
   ngram_vocabulary.parquet
+  global_counts.parquet
   ingestion_log.parquet
 ```
 
-All output Parquet schemas match the ClickHouse table schemas exactly (see §9.3). This allows `import` to load every file uniformly with `INSERT INTO ... SELECT * FROM file(...)`. There is no separate manifest — the `ingestion_log.parquet` file contains a single row with the watermark, tokenizer version, processing stats, and duration, in the same schema as the `ingestion_log` table.
+All output Parquet schemas match the ClickHouse table schemas exactly (see §9.3). This allows `import` to load every file uniformly. There is no separate manifest — the `ingestion_log.parquet` file contains a single row with the watermark, tokenizer version, processing stats, and duration.
 
 ### Vocabulary strategy
 
 In Parquet mode, vocabulary is built from scratch using a two-pass approach:
 
-1. **Pass 1**: Process all files, accumulate global counts
-2. **Merge**: Combine all counts, apply vocabulary admission thresholds
-3. **Pass 2**: Re-process all files, filter against vocabulary, write output Parquet
+1. **Pass 1**: Process all files, write per-file partial count files (sorted by key)
+2. **K-way merge**: Stream-merge all sorted partial files, apply vocabulary admission thresholds, and write `global_counts.parquet` incrementally. Memory during merge is O(num_files), not O(total unique n-grams). See `docs/design-decisions.md` for rationale.
+3. **Pass 2**: Re-process all files, filter against admitted vocabulary, write output Parquet
 
 This ensures the vocabulary reflects the full corpus.
 
@@ -419,13 +420,14 @@ Direct batch inserts into `ngram_counts`, `bucket_totals`, and `ngram_vocabulary
 
 ### Vocabulary strategy
 
-Vocabulary is loaded from ClickHouse at startup. Cumulative global counts are persisted locally between runs so that vocabulary admission decisions reflect the full history, not just the current batch. As new comments are processed, global counts increase, and:
+Vocabulary and cumulative global counts are both loaded from ClickHouse at startup. As new comments are processed, global counts increase, and:
 
 * n-grams that newly cross admission thresholds are inserted into the vocabulary table
-* already-admitted n-grams are re-inserted with updated `global_count` — ReplacingMergeTree keeps the latest
+* all vocabulary entries are re-inserted with updated `global_count` — ReplacingMergeTree keeps the latest
+* updated global counts are written back to the `global_counts` table
 * vocabulary only grows, never shrinks (see §7)
 
-After bootstrap via `import`, the VPS starts with no cumulative state — it is rebuilt from the first incremental run's processing. Subsequent runs load and extend it.
+After bootstrap via `import`, the VPS has the full `global_counts` table from the bootstrap run. Subsequent incremental runs load it, extend it, and write it back. All state lives in ClickHouse — no local files on prod.
 
 ### Watermark
 
@@ -470,6 +472,18 @@ CREATE TABLE ngram_vocabulary (
     global_count UInt64,
     admitted_at DateTime
 ) ENGINE = ReplacingMergeTree(admitted_at)
+ORDER BY (tokenizer_version, n, ngram);
+```
+
+### `global_counts`
+
+```sql
+CREATE TABLE global_counts (
+    tokenizer_version LowCardinality(String),
+    n UInt8,
+    ngram String,
+    count UInt64
+) ENGINE = ReplacingMergeTree(count)
 ORDER BY (tokenizer_version, n, ngram);
 ```
 
@@ -520,17 +534,17 @@ The `import` command loads Parquet output files into ClickHouse with an atomic t
 ### Steps
 
 1. Create staging tables with `_staging` suffix (same schemas as live tables)
-2. Load all Parquet files into their corresponding staging tables:
-   ```sql
-   INSERT INTO ngram_counts_staging SELECT * FROM file('ngram_counts.parquet')
-   INSERT INTO bucket_totals_staging SELECT * FROM file('bucket_totals.parquet')
-   INSERT INTO ngram_vocabulary_staging SELECT * FROM file('ngram_vocabulary.parquet')
-   ```
+2. Stream Parquet files batch-by-batch into their corresponding staging tables (bounded memory):
+   - `ngram_counts.parquet` → `ngram_counts_staging`
+   - `bucket_totals.parquet` → `bucket_totals_staging`
+   - `ngram_vocabulary.parquet` → `ngram_vocabulary_staging`
+   - `global_counts.parquet` → `global_counts_staging`
 3. Swap each data table atomically:
    ```sql
    EXCHANGE TABLES ngram_counts AND ngram_counts_staging
    EXCHANGE TABLES bucket_totals AND bucket_totals_staging
    EXCHANGE TABLES ngram_vocabulary AND ngram_vocabulary_staging
+   EXCHANGE TABLES global_counts AND global_counts_staging
    ```
 4. Drop the old tables (now named `_staging`)
 5. Load `ingestion_log.parquet` into the `ingestion_log` table (append, not swap — preserves audit history)
@@ -572,11 +586,15 @@ Watermark from `ingestion_log` ensures only new comments are processed. Re-runni
 
 Full corpus processing from timestamp 0. Output files are a complete, self-contained snapshot. `import` does a full table swap, so there is no duplicate risk.
 
-### Local crash recovery (Parquet mode only)
+### Parquet mode crash recovery
 
-Parquet mode is a long-running process over the full corpus. A local file tracks which input files have been processed so that a crashed run can resume. This file is internal to the workstation and never transferred to prod.
+Pass 1 writes sorted partial count files per month. Files with existing partials are skipped on re-run — delete a partial manually to reprocess that month. Pass 2 always re-runs from scratch (output directory is wiped).
 
-ClickHouse mode has **no local state files on prod**. All state lives in the database: watermark in `ingestion_log`, vocabulary in `ngram_vocabulary`, cumulative counts persisted locally only for vocabulary admission (see §9.2).
+ClickHouse mode has **no local files on prod**. All state lives in the database: watermark in `ingestion_log`, vocabulary in `ngram_vocabulary`, global counts in `global_counts`.
+
+### Tokenizer version guard
+
+ClickHouse mode checks `ingestion_log` for entries from a different tokenizer version and refuses to proceed. A tokenizer change requires a full rebuild via `process --output parquet` + `import`.
 
 ---
 
@@ -593,34 +611,35 @@ ClickHouse mode has **no local state files on prod**. All state lives in the dat
 
 ### Parquet mode (`--output parquet`)
 
-Two-pass pipeline with chunk-and-merge strategy:
+Two-pass pipeline. Always starts from scratch — no resume. If interrupted, re-run.
 
-**Pass 1: Vocabulary Build**
+**Pass 1: Vocabulary Build (concurrent)**
 
-For each Parquet file:
+For each Parquet file (concurrent, bounded to 2 files at a time):
 1. Read and filter all comments (no watermark — full corpus)
 2. Tokenize in parallel
 3. Count n-grams
-4. Persist partial global counts for this file
-5. Track progress in local manifest
+4. Write sorted partial global counts to disk
+5. Skip files that already have partials (delete manually to reprocess)
 
-After all files:
-6. Merge all partial counts into total global counts
-7. Apply vocabulary admission thresholds
+**K-way merge + vocabulary admission (streaming)**
 
-**Pass 2: Output**
+6. Stream-merge all sorted partial files using a BinaryHeap — O(num_files) memory
+7. For each unique (n, ngram, total_count): apply admission thresholds, write to `global_counts.parquet` incrementally
+8. Only admitted entries are kept in memory for pass 2
 
-For each Parquet file:
+**Pass 2: Output (concurrent producers, serial writer)**
+
+For each Parquet file (concurrent read/tokenize, serial parquet write):
 1. Read and filter all comments
 2. Tokenize in parallel
 3. Count n-grams
 4. Apply vocabulary filter + per-bucket pruning
-5. Append to output Parquet files
-6. Track progress in local manifest
+5. Write to output Parquet files
 
 After all files:
-7. Write `ngram_vocabulary.parquet` from the admitted vocabulary
-8. Write `ingestion_log.parquet` with a single row: watermark (max timestamp seen), tokenizer version, stats, duration
+6. Write `ngram_vocabulary.parquet` from the admitted vocabulary
+7. Write `ingestion_log.parquet` with watermark, tokenizer version, stats, duration
 
 ### ClickHouse mode (`--output clickhouse`)
 
@@ -628,31 +647,29 @@ Single-pass incremental pipeline:
 
 ```text
 process(data_dir, months, ch):
+    check for tokenizer version mismatch in ingestion_log
     watermark = latest ingestion_log entry (0 if none)
-    global_counts = load persisted cumulative counts (empty on first run)
+    global_counts = ch.load_global_counts()
     vocabulary = ch.load_vocabulary()
-    max_ts = watermark
 
     for each month in months:
-        comments = read comments after watermark from parquet file
+        read comments after watermark from parquet file
         if empty: skip
 
         tokenize and count n-grams in parallel
-        max_ts = max(max_ts, max timestamp in comments)
 
         // Accumulate global counts across all runs
         global_counts += this month's global counts
 
         // Admit new vocabulary and update existing entries
-        newly_admitted = apply admission thresholds to global_counts
-        re-insert changed vocabulary rows into ClickHouse
-        vocabulary = merge(vocabulary, newly_admitted)  // append-only
+        rebuild vocabulary from global_counts
+        re-insert all vocabulary rows into ClickHouse (ReplacingMergeTree deduplicates)
 
         // Filter and insert counts
         filter counts against vocabulary + per-bucket thresholds
         insert ngram_counts and bucket_totals into ClickHouse
 
-    persist cumulative global counts for next run
+    write updated global_counts to ClickHouse
     insert ingestion_log entry (watermark, stats, duration)
 ```
 
@@ -661,8 +678,9 @@ process(data_dir, months, ch):
 ## Rationale
 
 * Parquet mode: two-pass is required because global vocabulary thresholds need the full corpus
-* ClickHouse mode: single-pass with cumulative global counts enables vocabulary growth on prod
-* cumulative snapshot persists global counts between runs so vocabulary admission decisions are based on the full history, not just the current batch
+* K-way sorted merge keeps memory bounded during the merge of ~244 partial files (see `docs/design-decisions.md`)
+* ClickHouse mode: single-pass with global_counts table enables vocabulary growth on prod
+* all state on prod lives in ClickHouse — no local files
 * both modes share the same tokenization, counting, and pruning logic — only the output sink and vocabulary source differ
 
 ---
@@ -816,8 +834,8 @@ Options:
 
 **ClickHouse mode** (`--output clickhouse`):
 * Reads watermark from `ingestion_log` table
-* Loads existing vocabulary, expands with new admissions as global counts grow
-* Maintains cumulative global count snapshot on disk
+* Loads vocabulary and global counts from ClickHouse, expands with new admissions
+* All state in ClickHouse — no local files on prod
 * Inserts directly into ClickHouse
 * Logs run to `ingestion_log`
 

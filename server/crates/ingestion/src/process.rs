@@ -294,17 +294,21 @@ async fn process_parquet(
     }
     std::fs::create_dir_all(&output_dir)?;
 
-    // Also clean partial directory
-    let partial_dir = data_dir.join("partial");
-    if partial_dir.exists() {
-        std::fs::remove_dir_all(&partial_dir)?;
-    }
-
     // ================================================================
-    // Pass 1: Build vocabulary from global counts
+    // Pass 1: Build vocabulary from global counts (concurrent)
+    // Skip files that already have partial counts, except re-process
+    // the last one in case it was corrupted by a crash.
     // ================================================================
     tracing::info!("Pass 1: Building vocabulary from {} files", total);
 
+    // Limit concurrent files to 2: enough to overlap I/O with CPU,
+    // but bounded memory (each file's NgramCounter is ~1-2 GB for large months).
+    // Rayon already parallelizes tokenization within each file across all cores.
+    let file_concurrency = 2;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(file_concurrency));
+
+    let mut handles = Vec::new();
+    let mut skipped = 0usize;
     for (i, ym) in months.iter().enumerate() {
         let rel_path = ym.file_path();
         let local_path = data_dir.join(&rel_path);
@@ -313,37 +317,107 @@ async fn process_parquet(
             continue;
         }
 
-        tracing::info!("Pass 1: {} ({}/{})", rel_path, i + 1, total);
-        let file_start = std::time::Instant::now();
-
-        let path = local_path.clone();
-        let comments =
-            tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await??;
-        let comment_count = comments.len();
-
-        let counter =
-            tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
-                .await?;
-
-        let month_globals = counter.global_counts();
         let partial = vocabulary::partial_path(data_dir, ym);
-        vocabulary::write_partial_counts(&partial, &month_globals)?;
 
-        tracing::info!(
-            "  Comments: {} | Unique n-grams: {} | Elapsed: {:.1}s",
-            comment_count,
-            month_globals.len(),
-            file_start.elapsed().as_secs_f64()
-        );
+        // Skip if partial already exists (delete manually to reprocess)
+        if partial.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        let sem = semaphore.clone();
+        let idx = i + 1;
+
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            tracing::info!("Pass 1: {} ({}/{})", rel_path, idx, total);
+            let file_start = std::time::Instant::now();
+
+            let path = local_path.clone();
+            let comments =
+                tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await??;
+            let comment_count = comments.len();
+
+            let counter =
+                tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
+                    .await?;
+
+            let month_globals = counter.global_counts();
+            vocabulary::write_partial_counts(&partial, &month_globals)?;
+
+            tracing::info!(
+                "  {} — Comments: {} | Unique n-grams: {} | Elapsed: {:.1}s",
+                rel_path,
+                comment_count,
+                month_globals.len(),
+                file_start.elapsed().as_secs_f64()
+            );
+
+            Ok::<(), anyhow::Error>(())
+        });
+
+        handles.push(handle);
     }
 
-    // Merge partials and build vocabulary
-    tracing::info!("Merging partial counts...");
-    let global_counts = vocabulary::merge_partial_counts(data_dir, months)?;
+    if skipped > 0 {
+        tracing::info!("Skipped {} files with existing partials", skipped);
+    }
 
-    let total_unigrams = global_counts.iter().filter(|((n, _), _)| *n == 1).count();
-    let total_bigrams = global_counts.iter().filter(|((n, _), _)| *n == 2).count();
-    let total_trigrams = global_counts.iter().filter(|((n, _), _)| *n == 3).count();
+    for handle in handles {
+        handle.await??;
+    }
+
+    // Merge partials, build vocabulary, and write global_counts.parquet
+    // in a single streaming pass. Memory = O(admitted vocabulary), not O(all n-grams).
+    tracing::info!("Streaming merge + vocabulary build + global_counts.parquet...");
+
+    let gc_path = output_dir.join("global_counts.parquet");
+    let mut gc_writer = parquet_writer::GlobalCountsWriter::new(&gc_path)?;
+
+    // Vocabulary: only admitted entries (much smaller than all n-grams)
+    let mut vocabulary: std::collections::HashMap<(u8, String), ()> =
+        std::collections::HashMap::new();
+    // Track admitted entries with their global_count for vocabulary parquet
+    let mut vocab_counts: std::collections::HashMap<(u8, String), u64> =
+        std::collections::HashMap::new();
+
+    let mut total_unigrams = 0u64;
+    let mut total_bigrams = 0u64;
+    let mut total_trigrams = 0u64;
+    let mut total_gc_rows = 0u64;
+
+    vocabulary::merge_partial_counts_streaming(data_dir, months, |entry| {
+        // Write every entry to global_counts.parquet
+        gc_writer.write_one(&GlobalCountRow {
+            tokenizer_version: tv.clone(),
+            n: entry.n,
+            ngram: entry.ngram.clone(),
+            count: entry.count,
+        })?;
+        total_gc_rows += 1;
+
+        // Track counts by n
+        match entry.n {
+            1 => total_unigrams += 1,
+            2 => total_bigrams += 1,
+            3 => total_trigrams += 1,
+            _ => {}
+        }
+
+        // Check admission threshold
+        let min_global = config.min_global_count(entry.n);
+        if entry.count >= min_global {
+            vocabulary.insert((entry.n, entry.ngram.clone()), ());
+            vocab_counts.insert((entry.n, entry.ngram), entry.count);
+        }
+
+        Ok(())
+    })?;
+
+    gc_writer.finish()?;
+
+    let admitted_bigrams = vocabulary.iter().filter(|((n, _), _)| *n == 2).count();
+    let admitted_trigrams = vocabulary.iter().filter(|((n, _), _)| *n == 3).count();
 
     tracing::info!(
         "Global counts: {} unigrams, {} bigram candidates, {} trigram candidates",
@@ -351,12 +425,6 @@ async fn process_parquet(
         total_bigrams,
         total_trigrams,
     );
-
-    let vocabulary = build_vocabulary(&global_counts, &config);
-
-    let admitted_bigrams = vocabulary.iter().filter(|((n, _), _)| *n == 2).count();
-    let admitted_trigrams = vocabulary.iter().filter(|((n, _), _)| *n == 3).count();
-
     tracing::info!(
         "Admitted: {} bigrams (of {}), {} trigrams (of {})",
         admitted_bigrams,
@@ -364,9 +432,12 @@ async fn process_parquet(
         admitted_trigrams,
         total_trigrams,
     );
+    tracing::info!("Wrote {} global count rows to parquet", total_gc_rows);
 
     // ================================================================
     // Pass 2: Filter and write output Parquet files
+    // Producers (concurrent): read, tokenize, filter
+    // Consumer (single): write to Parquet
     // ================================================================
     tracing::info!("Pass 2: Writing output Parquet files");
 
@@ -381,91 +452,125 @@ async fn process_parquet(
     let mut total_count_rows = 0u64;
     let mut total_total_rows = 0u64;
 
-    for (i, ym) in months.iter().enumerate() {
+    // Channel for processed results
+    struct Pass2Result {
+        count_rows: Vec<NgramCountRow>,
+        total_rows: Vec<BucketTotalRow>,
+        comment_count: u64,
+        max_ts: i64,
+        rel_path: String,
+        elapsed_secs: f64,
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Pass2Result>(file_concurrency);
+
+    // Spawn producers
+    let producer_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(file_concurrency));
+    for ym in months.iter() {
         let rel_path = ym.file_path();
         let local_path = data_dir.join(&rel_path);
         if !local_path.exists() {
             continue;
         }
 
-        tracing::info!("Pass 2: {} ({}/{})", rel_path, i + 1, total);
-        let file_start = std::time::Instant::now();
+        let tx = tx.clone();
+        let sem = producer_sem.clone();
+        let vocab = vocabulary.clone();
+        let cfg = config.clone();
+        let tv = tv.clone();
 
-        let path = local_path.clone();
-        let comments =
-            tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await??;
-        let comment_count = comments.len();
-        total_comments += comment_count as u64;
+        tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let file_start = std::time::Instant::now();
 
-        // Track max timestamp
-        if let Some(ts) = comments.iter().map(|c| c.ts_ms).max() {
-            max_ts = max_ts.max(ts);
-        }
+            let path = local_path.clone();
+            let comments = match tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => { tracing::error!("Failed to read {}: {}", rel_path, e); return; }
+                Err(e) => { tracing::error!("Task failed for {}: {}", rel_path, e); return; }
+            };
 
-        let counter =
-            tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
-                .await?;
+            let comment_count = comments.len() as u64;
+            let file_max_ts = comments.iter().map(|c| c.ts_ms).max().unwrap_or(0);
 
-        // Filter counts against vocabulary
-        let filtered_counts = counter.filter_to_vocabulary(&vocabulary, &config);
-        let totals = counter.totals();
+            let counter = match tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments)).await {
+                Ok(c) => c,
+                Err(e) => { tracing::error!("Tokenization failed for {}: {}", rel_path, e); return; }
+            };
 
-        // Convert to row types
-        let mut count_rows: Vec<NgramCountRow> = Vec::with_capacity(filtered_counts.len());
-        for (key, count) in &filtered_counts {
-            let bucket = parse_bucket_date(&key.bucket)?;
-            count_rows.push(NgramCountRow {
-                tokenizer_version: tv.clone(),
-                n: key.n,
-                ngram: key.ngram.clone(),
-                bucket,
-                count: *count,
-            });
-        }
+            let filtered_counts = counter.filter_to_vocabulary(&vocab, &cfg);
+            let totals = counter.totals();
 
-        let mut total_rows: Vec<BucketTotalRow> = Vec::with_capacity(totals.len());
-        for (key, &total_count) in totals {
-            let bucket = parse_bucket_date(&key.bucket)?;
-            total_rows.push(BucketTotalRow {
-                tokenizer_version: tv.clone(),
-                n: key.n,
-                bucket,
-                total_count,
-            });
-        }
+            let mut count_rows = Vec::with_capacity(filtered_counts.len());
+            for (key, count) in &filtered_counts {
+                if let Ok(bucket) = parse_bucket_date(&key.bucket) {
+                    count_rows.push(NgramCountRow {
+                        tokenizer_version: tv.clone(),
+                        n: key.n,
+                        ngram: key.ngram.clone(),
+                        bucket,
+                        count: *count,
+                    });
+                }
+            }
 
-        // Write to Parquet (incrementally, per month)
-        counts_writer.write_batch(&count_rows)?;
-        totals_writer.write_batch(&total_rows)?;
+            let mut total_rows = Vec::with_capacity(totals.len());
+            for (key, &total_count) in totals {
+                if let Ok(bucket) = parse_bucket_date(&key.bucket) {
+                    total_rows.push(BucketTotalRow {
+                        tokenizer_version: tv.clone(),
+                        n: key.n,
+                        bucket,
+                        total_count,
+                    });
+                }
+            }
 
-        total_count_rows += count_rows.len() as u64;
-        total_total_rows += total_rows.len() as u64;
+            let _ = tx.send(Pass2Result {
+                count_rows,
+                total_rows,
+                comment_count,
+                max_ts: file_max_ts,
+                rel_path: rel_path.to_string(),
+                elapsed_secs: file_start.elapsed().as_secs_f64(),
+            }).await;
+        });
+    }
+    drop(tx); // Close sender so receiver knows when all producers are done
+
+    // Consumer: write results as they arrive
+    while let Some(result) = rx.recv().await {
+        counts_writer.write_batch(&result.count_rows)?;
+        totals_writer.write_batch(&result.total_rows)?;
+
+        total_comments += result.comment_count;
+        total_count_rows += result.count_rows.len() as u64;
+        total_total_rows += result.total_rows.len() as u64;
+        max_ts = max_ts.max(result.max_ts);
 
         tracing::info!(
-            "  Comments: {} | Counts: {} | Totals: {} | Elapsed: {:.1}s",
-            comment_count,
-            count_rows.len(),
-            total_rows.len(),
-            file_start.elapsed().as_secs_f64()
+            "  {} — Comments: {} | Counts: {} | Totals: {} | Elapsed: {:.1}s",
+            result.rel_path,
+            result.comment_count,
+            result.count_rows.len(),
+            result.total_rows.len(),
+            result.elapsed_secs
         );
     }
 
     counts_writer.finish()?;
     totals_writer.finish()?;
 
-    // Write vocabulary parquet
+    // Write vocabulary parquet (using vocab_counts from streaming merge)
     let now = time::OffsetDateTime::now_utc();
-    let vocab_rows: Vec<NgramVocabularyRow> = vocabulary
-        .keys()
-        .map(|(n, ngram)| {
-            let gc = global_counts.get(&(*n, ngram.clone())).copied().unwrap_or(0);
-            NgramVocabularyRow {
-                tokenizer_version: tv.clone(),
-                n: *n,
-                ngram: ngram.clone(),
-                global_count: gc,
-                admitted_at: now,
-            }
+    let vocab_rows: Vec<NgramVocabularyRow> = vocab_counts
+        .iter()
+        .map(|((n, ngram), &gc)| NgramVocabularyRow {
+            tokenizer_version: tv.clone(),
+            n: *n,
+            ngram: ngram.clone(),
+            global_count: gc,
+            admitted_at: now,
         })
         .collect();
 
@@ -473,19 +578,7 @@ async fn process_parquet(
     parquet_writer::write_vocabulary_parquet(&vocab_path, &vocab_rows)?;
     tracing::info!("Wrote {} vocabulary rows", vocab_rows.len());
 
-    // Write global_counts parquet
-    let gc_rows: Vec<GlobalCountRow> = global_counts
-        .iter()
-        .map(|((n, ngram), &count)| GlobalCountRow {
-            tokenizer_version: tv.clone(),
-            n: *n,
-            ngram: ngram.clone(),
-            count,
-        })
-        .collect();
-    let gc_path = output_dir.join("global_counts.parquet");
-    parquet_writer::write_global_counts_parquet(&gc_path, &gc_rows)?;
-    tracing::info!("Wrote {} global count rows", gc_rows.len());
+    // global_counts.parquet was already written during the streaming merge
 
     // Write ingestion_log parquet
     let duration = run_start.elapsed();
@@ -715,46 +808,71 @@ mod parquet_writer {
         Ok(())
     }
 
-    pub fn write_global_counts_parquet(
-        path: &Path,
-        rows: &[GlobalCountRow],
-    ) -> anyhow::Result<()> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("tokenizer_version", DataType::Utf8, false),
-            Field::new("n", DataType::UInt8, false),
-            Field::new("ngram", DataType::Utf8, false),
-            Field::new("count", DataType::UInt64, false),
-        ]));
+    pub struct GlobalCountsWriter {
+        writer: ArrowWriter<std::fs::File>,
+        buf_tv: StringBuilder,
+        buf_n: UInt8Builder,
+        buf_ngram: StringBuilder,
+        buf_count: UInt64Builder,
+        buf_len: usize,
+    }
 
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("Failed to create {}", path.display()))?;
-        let mut writer = ArrowWriter::try_new(file, schema, Some(writer_props()))?;
+    const GC_FLUSH_SIZE: usize = 65536;
 
-        if !rows.is_empty() {
-            let mut tv = StringBuilder::with_capacity(rows.len(), rows.len() * 2);
-            let mut n = UInt8Builder::with_capacity(rows.len());
-            let mut ngram = StringBuilder::with_capacity(rows.len(), rows.len() * 16);
-            let mut count = UInt64Builder::with_capacity(rows.len());
-
-            for row in rows {
-                tv.append_value(&row.tokenizer_version);
-                n.append_value(row.n);
-                ngram.append_value(&row.ngram);
-                count.append_value(row.count);
-            }
-
-            let batch = RecordBatch::try_from_iter(vec![
-                ("tokenizer_version", Arc::new(tv.finish()) as _),
-                ("n", Arc::new(n.finish()) as _),
-                ("ngram", Arc::new(ngram.finish()) as _),
-                ("count", Arc::new(count.finish()) as _),
-            ])?;
-
-            writer.write(&batch)?;
+    impl GlobalCountsWriter {
+        pub fn new(path: &Path) -> anyhow::Result<Self> {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("tokenizer_version", DataType::Utf8, false),
+                Field::new("n", DataType::UInt8, false),
+                Field::new("ngram", DataType::Utf8, false),
+                Field::new("count", DataType::UInt64, false),
+            ]));
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("Failed to create {}", path.display()))?;
+            let writer = ArrowWriter::try_new(file, schema, Some(writer_props()))?;
+            Ok(Self {
+                writer,
+                buf_tv: StringBuilder::new(),
+                buf_n: UInt8Builder::new(),
+                buf_ngram: StringBuilder::new(),
+                buf_count: UInt64Builder::new(),
+                buf_len: 0,
+            })
         }
 
-        writer.close()?;
-        Ok(())
+        pub fn write_one(&mut self, row: &GlobalCountRow) -> anyhow::Result<()> {
+            self.buf_tv.append_value(&row.tokenizer_version);
+            self.buf_n.append_value(row.n);
+            self.buf_ngram.append_value(&row.ngram);
+            self.buf_count.append_value(row.count);
+            self.buf_len += 1;
+
+            if self.buf_len >= GC_FLUSH_SIZE {
+                self.flush_buf()?;
+            }
+            Ok(())
+        }
+
+        fn flush_buf(&mut self) -> anyhow::Result<()> {
+            if self.buf_len == 0 {
+                return Ok(());
+            }
+            let batch = RecordBatch::try_from_iter(vec![
+                ("tokenizer_version", Arc::new(self.buf_tv.finish()) as _),
+                ("n", Arc::new(self.buf_n.finish()) as _),
+                ("ngram", Arc::new(self.buf_ngram.finish()) as _),
+                ("count", Arc::new(self.buf_count.finish()) as _),
+            ])?;
+            self.writer.write(&batch)?;
+            self.buf_len = 0;
+            Ok(())
+        }
+
+        pub fn finish(mut self) -> anyhow::Result<()> {
+            self.flush_buf()?;
+            self.writer.close()?;
+            Ok(())
+        }
     }
 
     pub fn write_ingestion_log_parquet(

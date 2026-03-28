@@ -30,7 +30,7 @@ dotenvy.workspace = true
 clap = { version = "4", features = ["derive"] }
 
 # Parquet / Arrow
-parquet = { version = "53", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "53", default-features = false, features = ["arrow", "zstd", "snap"] }
 arrow = { version = "53", default-features = false }
 
 # HTTP downloads
