@@ -4,7 +4,7 @@
 
 ## Status
 
-**Implemented** — `server/crates/ingestion/`
+**In Progress** — redesigning for parquet output + import workflow
 
 ---
 
@@ -17,9 +17,10 @@ Define:
 * tokenization integration (RFC-001)
 * n-gram generation + pruning (RFC-002)
 * aggregation strategy with bounded memory
-* ClickHouse loading
+* dual output: ClickHouse-ready Parquet files or direct DB insertion
+* import with atomic table swap
+* ingestion log for watermark tracking
 * idempotency guarantees
-* watermark-based incremental ingestion
 * CLI interface
 * progress reporting
 
@@ -27,45 +28,48 @@ Define:
 
 ## 1. Pipeline Overview
 
-### Primary: Single-Pass Incremental (`ingest`)
-
-The recommended command. Combines vocabulary update and count insertion in one tokenization pass per file, with watermark-based filtering for incremental updates.
+Three subcommands handle the full lifecycle:
 
 ```text
-For each file:
-  Read comments after watermark → Tokenize → Count n-grams
-  → Update cumulative global counts
-  → Rebuild vocabulary, delta-insert new admissions to ClickHouse
-  → Apply pruning (per-bucket + vocabulary filter)
-  → Insert ngram_counts + bucket_totals into ClickHouse
-  → Advance watermark
+ingestion download   — fetch raw Parquet from HuggingFace
+ingestion process    — tokenize, count, prune → output parquet or direct to ClickHouse
+ingestion import     — load parquet into staging tables, atomic swap to live
 ```
 
-### Legacy: Two-Pass (`vocabulary` + `backfill`)
+### Why two output modes?
 
-Still available for explicit control over each phase.
+Processing the full corpus (~41M comments) is CPU- and disk-intensive. The prod environment is a small, inexpensive VPS that cannot handle this workload in reasonable time. We assume the developer has a local workstation that is significantly faster. The Parquet output mode exists to **bootstrap prod once**: process the full corpus locally, transfer the output files, and import them. After that, all ongoing ingestion happens directly on the VPS via ClickHouse mode — daily or monthly deltas are small enough to process on modest hardware.
+
+### Bootstrap (one-time, local workstation → prod)
 
 ```text
-Phase 1 — vocabulary:
-  For each file:
-    Read → Tokenize → Count n-grams → Write partial counts to TSV
-  Merge all partials → Build admitted vocabulary → Insert to ClickHouse
-
-Phase 2 — backfill:
-  For each file:
-    Read → Tokenize → Count n-grams
-    → Apply vocabulary filter + per-bucket pruning
-    → Insert ngram_counts + bucket_totals into ClickHouse
+download → process --output parquet → scp → import
 ```
+
+### Incremental (ongoing, on prod VPS)
+
+```text
+download → process
+```
+
+### `process` output modes
+
+| | `--output parquet` | `--output clickhouse` (default) |
+|---|---|---|
+| **Vocabulary** | Built from scratch (two-pass) | Read from DB, expand with new admissions |
+| **Watermark source** | 0 (full corpus) | `ingestion_log` table |
+| **ClickHouse needed** | No | Yes |
+| **Use case** | One-time bootstrap | Ongoing incremental updates |
 
 ---
 
 ## Rationale
 
-* single-pass avoids re-reading files, halving I/O for the common case
-* watermark enables daily/hourly updates without re-processing
-* legacy two-pass remains for full rebuilds or debugging
-* each phase/command is independently restartable
+* full-corpus processing is too heavy for a small VPS — run it on the developer's workstation
+* Parquet mode is a bootstrap transport artifact, not a long-term operating mode
+* Parquet is the natural interchange format — ClickHouse reads it natively
+* incremental updates are lightweight enough for the VPS
+* single `process` command with output flag avoids duplicating logic
 
 ---
 
@@ -202,7 +206,6 @@ The expected file set is computed from a start month and end month (`YearMonth` 
 * processing is parallelized within each file using rayon
 * unit of parallelism: 1024-comment chunks processed in parallel
 * files are processed **sequentially** (one at a time) to bound memory
-* legacy `vocabulary` command processes files concurrently with bounded parallelism (semaphore sized to available CPU cores)
 
 ---
 
@@ -262,7 +265,7 @@ The expected file set is computed from a start month and end month (`YearMonth` 
 
 ## Spec
 
-Aggregation occurs **before any database write**.
+Aggregation occurs **before any output** (database write or Parquet file write).
 
 ---
 
@@ -352,8 +355,8 @@ After processing all rows in a Parquet file:
 
 1. Compute per-bucket aggregates for all comments in that file
 2. Apply pruning (per-bucket thresholds + vocabulary filter)
-3. Batch insert into ClickHouse
-4. Record progress (manifest save for legacy, watermark advance for `ingest`)
+3. Write output (append to Parquet files or batch insert into ClickHouse)
+4. Record progress in local manifest
 
 ---
 
@@ -373,42 +376,179 @@ After processing all rows in a Parquet file:
 
 ---
 
-# 9. ClickHouse Insert
+# 9. Output
 
-## Spec
+## 9.1 Parquet Output (`--output parquet`)
 
-* insert using batch inserts
-* insert only aggregated rows
-* three table targets: `ngram_counts`, `bucket_totals`, `ngram_vocabulary`
+### Output structure
 
----
-
-### Row types
-
-```rust
-NgramCountRow    { tokenizer_version, n, ngram, bucket, count }
-BucketTotalRow   { tokenizer_version, n, bucket, total_count }
-NgramVocabularyRow { tokenizer_version, n, ngram, global_count, admitted_at }
+```text
+{data-dir}/output/
+  ngram_counts.parquet
+  bucket_totals.parquet
+  ngram_vocabulary.parquet
+  manifest.json
 ```
 
----
+Parquet schemas match the ClickHouse table schemas exactly (see §9.3). This allows `import` to load them with a direct `INSERT INTO ... SELECT * FROM file(...)`.
 
-## Requirements
+The `manifest.json` contains metadata for `import`:
 
-* tables use ReplacingMergeTree — dedup happens at merge time
-* no duplicate keys (enforced by manifest/watermark tracking)
-* consistent ordering not required
+```json
+{
+  "tokenizer_version": "1",
+  "last_ingested_ts": 1711584000000,
+  "start_month": "2006-10",
+  "end_month": "2026-03"
+}
+```
+
+### Vocabulary strategy
+
+In Parquet mode, vocabulary is built from scratch using a two-pass approach:
+
+1. **Pass 1**: Process all files, accumulate global counts, write partial TSVs
+2. **Merge**: Combine all partials, apply `build_vocabulary()` thresholds
+3. **Pass 2**: Re-process all files, filter against vocabulary, write output Parquet
+
+This ensures the vocabulary reflects the full corpus.
+
+## 9.2 ClickHouse Output (`--output clickhouse`, default)
+
+Direct batch inserts into `ngram_counts`, `bucket_totals`, and `ngram_vocabulary` tables.
+
+### Vocabulary strategy
+
+In ClickHouse mode, vocabulary is read from the database at startup and cumulative global counts are maintained. As new comments are processed, global counts increase, and n-grams that newly cross admission thresholds are delta-inserted into the vocabulary table. Previously admitted n-grams are never dropped (append-only). Vocabulary only grows over time.
+
+### Watermark
+
+Read from the `ingestion_log` table (0 if no entries). Only comments with `time > watermark` are processed. After successful processing, a new `ingestion_log` entry is written.
+
+## 9.3 ClickHouse Table Schemas
+
+### `ngram_counts`
+
+```sql
+CREATE TABLE ngram_counts (
+    tokenizer_version LowCardinality(String),
+    n UInt8,
+    ngram String,
+    bucket Date,
+    count UInt32
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(bucket)
+ORDER BY (tokenizer_version, n, ngram, bucket);
+```
+
+### `bucket_totals`
+
+```sql
+CREATE TABLE bucket_totals (
+    tokenizer_version LowCardinality(String),
+    n UInt8,
+    bucket Date,
+    total_count UInt64
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(bucket)
+ORDER BY (tokenizer_version, n, bucket);
+```
+
+### `ngram_vocabulary`
+
+```sql
+CREATE TABLE ngram_vocabulary (
+    tokenizer_version LowCardinality(String),
+    n UInt8,
+    ngram String,
+    global_count UInt64,
+    admitted_at DateTime
+) ENGINE = ReplacingMergeTree(admitted_at)
+ORDER BY (tokenizer_version, n, ngram);
+```
+
+### `ingestion_log`
+
+```sql
+CREATE TABLE ingestion_log (
+    id UUID DEFAULT generateUUIDv7(),
+    tokenizer_version LowCardinality(String),
+    command LowCardinality(String),
+    last_ingested_ts Int64,
+    comments_processed UInt64,
+    ngram_counts_inserted UInt64,
+    bucket_totals_inserted UInt64,
+    vocabulary_inserted UInt64,
+    start_month String,
+    end_month String,
+    duration_ms UInt64,
+    created_at DateTime64(3, 'UTC') DEFAULT now64()
+) ENGINE = MergeTree()
+ORDER BY id;
+```
+
+The `ingestion_log` is an append-only audit trail. Each `process` (ClickHouse mode) and `import` run appends one row. The watermark is read as:
+
+```sql
+SELECT last_ingested_ts FROM ingestion_log ORDER BY id DESC LIMIT 1
+```
 
 ---
 
 ## Rationale
 
-* ClickHouse optimized for large batch inserts
-* ReplacingMergeTree provides eventual dedup as safety net
+* Parquet output decouples heavy processing from ClickHouse — no DB needed on the workstation
+* ClickHouse reads Parquet natively — no custom format or protocol
+* `ingestion_log` replaces the manifest for prod state — single source of truth in the DB
+* UUIDv7 is time-sortable, so `ORDER BY id DESC LIMIT 1` always gives the latest entry
+* audit trail is free and useful for debugging
 
 ---
 
-# 10. Idempotency
+# 10. Import
+
+## Spec (mandatory)
+
+The `import` command loads Parquet output files into ClickHouse with an atomic table swap.
+
+### Steps
+
+1. Read `manifest.json` from the output directory
+2. Create staging tables with `_staging` suffix (same schemas as live tables)
+3. Load Parquet files into staging tables:
+   ```sql
+   INSERT INTO ngram_counts_staging SELECT * FROM file('ngram_counts.parquet')
+   INSERT INTO bucket_totals_staging SELECT * FROM file('bucket_totals.parquet')
+   INSERT INTO ngram_vocabulary_staging SELECT * FROM file('ngram_vocabulary.parquet')
+   ```
+4. Swap each table atomically:
+   ```sql
+   EXCHANGE TABLES ngram_counts AND ngram_counts_staging
+   EXCHANGE TABLES bucket_totals AND bucket_totals_staging
+   EXCHANGE TABLES ngram_vocabulary AND ngram_vocabulary_staging
+   ```
+5. Drop the old tables (now named `_staging`)
+6. Write an `ingestion_log` entry with the watermark from `manifest.json`
+
+### Consistency
+
+`EXCHANGE TABLES` swaps one pair at a time. There is a brief window between swaps where tables are mismatched. For a low-QPS site this is acceptable — queries during the swap may see slightly inconsistent data for a fraction of a second.
+
+### After import
+
+Once `import` completes, incremental `process` runs on the VPS pick up from the watermark recorded in `ingestion_log`. Run `process` covering through the present day to fill any gap.
+
+---
+
+## Rationale
+
+* atomic swap means zero downtime — the old data serves queries until the swap instant
+* staging tables prevent partial loads from being visible
+* `ingestion_log` entry ensures `process` knows where the bootstrap left off
+
+---
+
+# 11. Idempotency
 
 ## Spec (mandatory)
 
@@ -418,40 +558,28 @@ Pipeline must guarantee:
 no duplicate (tokenizer_version, n, ngram, bucket)
 ```
 
-### Mechanism: watermark (`ingest` command)
+### ClickHouse mode
 
-The manifest stores `last_ingested_ts: i64` (milliseconds since epoch) — the timestamp of the newest comment processed. On each run, only comments with `time > watermark` are processed.
+Watermark from `ingestion_log` ensures only new comments are processed. Re-running is a no-op if no new comments exist.
 
-This means:
-* re-running is a no-op if no new comments exist
-* new comments in existing month files are picked up automatically
-* a single global value tracks progress across all files
+### Parquet mode
 
-### Mechanism: file-level manifest (legacy commands)
+Full corpus processing from timestamp 0. Output files are a complete, self-contained snapshot. `import` does a full table swap, so there is no duplicate risk.
 
-For `vocabulary` and `backfill`, the manifest tracks per-file completion:
+### Local manifest
+
+A local manifest file at `{data-dir}/manifest.json` tracks which input files have been processed, enabling resume after crashes. This file is local-only — it does not exist on prod.
 
 ```json
 {
   "tokenizer_version": "1",
-  "phase1_completed": ["data/2024/2024-01.parquet", ...],
-  "phase2_completed": ["data/2024/2024-01.parquet", ...],
-  "vocabulary_built": true,
-  "last_ingested_ts": 0
+  "files_completed": ["data/2024/2024-01.parquet", ...]
 }
 ```
 
-Before processing a file:
-* check if the file path is in the corresponding completed list
-* if yes, skip it
-
-After successfully processing:
-* append file path to completed list
-* save manifest atomically (write tmp, rename)
-
 ### Tokenizer version change
 
-If `tokenizer_version` in the manifest does not match the current `TOKENIZER_VERSION`, the pipeline errors and requires manual manifest deletion to proceed. A tokenizer change requires full rebuild (all data is invalidated).
+If `tokenizer_version` in the local manifest does not match the current `TOKENIZER_VERSION`, the pipeline errors and requires manifest deletion. A tokenizer change requires a full rebuild.
 
 ---
 
@@ -459,47 +587,52 @@ If `tokenizer_version` in the manifest does not match the current `TOKENIZER_VER
 
 * ClickHouse does not enforce uniqueness at insert time — duplicates corrupt counts
 * watermark provides simple, global progress tracking for incremental mode
-* file-level tracking is simple and aligns with flush boundaries for legacy mode
-* manifest is human-readable and debuggable
+* Parquet mode + atomic swap guarantees a clean slate
+* local manifest enables crash recovery without polluting prod state
 
 ---
 
-# 11. Watermark-Based Incremental Ingestion
+# 12. Process Flow Detail
 
-## Spec (mandatory)
+### Parquet mode (`--output parquet`)
 
-The `ingest` command uses a single-pass pipeline with watermark filtering and cumulative global count tracking.
+Two-pass pipeline with chunk-and-merge strategy:
 
-### Watermark
+**Pass 1: Vocabulary Build**
 
-A single `i64` value in the manifest: `last_ingested_ts` (milliseconds since epoch). This is the timestamp of the newest comment processed.
+For each Parquet file:
+1. Read and filter all comments (no watermark — full corpus)
+2. Tokenize in parallel (rayon, 1024-comment chunks)
+3. Count n-grams using `NgramCounter`
+4. Write partial global counts to `{data-dir}/partial/{YYYY-MM}.counts`
+5. Mark file done in local manifest
 
-On each run:
-1. Read the watermark from manifest (0 if first run)
-2. For each month's Parquet file, read comments with `time > watermark`
-3. Months with no new comments are skipped
-4. After processing, watermark advances to the max timestamp seen
+After all files:
+6. Merge all partial count files into total global counts
+7. Apply `build_vocabulary()` with `PruningConfig` thresholds
 
-### Cumulative global counts
+**Pass 2: Output**
 
-Global n-gram counts are persisted in a binary snapshot (`{data-dir}/cumulative.bin`, bincode format) so vocabulary can be incrementally updated without re-reading all files.
+For each Parquet file:
+1. Read and filter all comments
+2. Tokenize in parallel
+3. Count n-grams using `NgramCounter`
+4. Apply vocabulary filter + per-bucket pruning
+5. Append to output Parquet files (`ngram_counts.parquet`, `bucket_totals.parquet`)
+6. Mark file done in local manifest
 
-```rust
-struct CumulativeSnapshot {
-    version: u8,
-    counts: HashMap<(u8, String), u64>,
-}
-```
+After all files:
+7. Write `ngram_vocabulary.parquet` from the admitted vocabulary
+8. Write `manifest.json` with watermark (max timestamp seen) and metadata
 
-If the snapshot is missing or corrupt, it is rebuilt from partial TSV files.
+### ClickHouse mode (`--output clickhouse`)
 
-### Ingest flow
+Single-pass incremental pipeline:
 
 ```text
-ingest(data_dir, months, manifest, ch):
-    global_counts = load_cumulative_snapshot(data_dir)
+process(data_dir, months, ch):
+    watermark = latest ingestion_log entry (0 if none)
     prev_vocab = ch.load_vocabulary()
-    watermark = manifest.last_ingested_ts
     max_ts = watermark
 
     for each month in months:
@@ -511,9 +644,6 @@ ingest(data_dir, months, manifest, ch):
 
         // Update cumulative global counts
         global_counts += counter.global_counts()
-
-        // Write partial TSV for recovery
-        write_partial_counts(partial_path, month_globals)
 
         // Rebuild vocabulary, delta-insert new admissions
         vocabulary = build_vocabulary(&global_counts, &config)
@@ -527,105 +657,17 @@ ingest(data_dir, months, manifest, ch):
         ch.insert_ngram_counts(filtered)
         ch.insert_bucket_totals(counter.totals())
 
-    manifest.last_ingested_ts = max_ts
-    save_cumulative_snapshot(global_counts)
+    // Log the run
+    ch.insert_ingestion_log(entry with max_ts, stats, duration)
 ```
-
-### Vocabulary is append-only
-
-Previously admitted n-grams are always retained. The vocabulary set from ClickHouse is loaded once at start and merged with newly admitted n-grams after each file. This prevents loss of historical vocabulary when global counts shift.
-
----
-
-## Operational examples
-
-First full ingest:
-```
-cargo run -p ingestion -- ingest --start 2024-01 --end 2024-12
-```
-Watermark set to the max timestamp across all of 2024.
-
-Daily update (re-download current month, run ingest):
-```
-cargo run -p ingestion -- download --start 2025-03 --end 2025-03
-cargo run -p ingestion -- ingest --start 2025-03 --end 2025-03
-```
-Only comments newer than the watermark are processed.
-
-Re-run is a no-op:
-```
-cargo run -p ingestion -- ingest --start 2024-01 --end 2024-12
-```
-All comments <= watermark, nothing is processed.
-
----
-
-## Edge cases
-
-- **Out-of-order timestamps**: Comments with timestamps older than the watermark are skipped. The dataset is append-only and we don't retroactively adjust.
-- **Parquet file re-downloaded with corrections**: Older modified comments won't be picked up. A full rebuild handles this case.
-- **Watermark corruption**: If the manifest is deleted, watermark resets to 0 and everything re-processes. Since ClickHouse tables use MergeTree, this creates duplicates. Clear ClickHouse tables before a full rebuild.
 
 ---
 
 ## Rationale
 
-* single tokenization pass halves I/O vs two-pass
-* watermark enables any-frequency incremental updates
-* cumulative snapshot avoids re-reading all partials on each run
-* partial TSV files provide recovery if snapshot corrupts
-
----
-
-# 12. Legacy Two-Pass Pipeline
-
-### Pass 1: Vocabulary Build (`vocabulary` command)
-
-For each Parquet file (concurrent, semaphore-bounded):
-
-1. Read and filter comments
-2. Tokenize each comment
-3. Count n-grams using `NgramCounter`
-4. Extract global counts via `NgramCounter::global_counts()`
-5. Write partial global counts to `{data-dir}/partial/{YYYY-MM}.counts`
-6. Mark file as phase 1 done in manifest
-
-After all files:
-
-7. Merge all partial count files into total global counts
-8. Apply `build_vocabulary()` with `PruningConfig` thresholds
-9. Load previous vocabulary from ClickHouse (append-only merge)
-10. Insert vocabulary into ClickHouse `ngram_vocabulary` table
-11. Mark `vocabulary_built: true` in manifest
-
-### Partial count file format
-
-TSV, one line per unique (n, ngram) pair:
-
-```text
-{n}\t{ngram}\t{count}\n
-```
-
-### Pass 2: Backfill (`backfill` command)
-
-Requires `vocabulary_built == true`.
-
-For each Parquet file:
-
-1. Read and filter comments
-2. Tokenize each comment
-3. Count n-grams using `NgramCounter`
-4. Apply vocabulary filter + per-bucket pruning
-5. Batch insert `ngram_counts` and `bucket_totals` into ClickHouse
-6. Mark file as phase 2 done in manifest
-
----
-
-## Rationale
-
-* two-pass is useful for full rebuilds where vocabulary must be computed from the entire corpus before any counts are inserted
-* each phase is independently restartable
-* concurrent file processing in phase 1 speeds up vocabulary building
+* Parquet mode: two-pass is required because global vocabulary thresholds need the full corpus
+* ClickHouse mode: single-pass with read-only vocabulary keeps prod updates simple
+* both modes share the same tokenization, counting, and pruning logic — only the output sink differs
 
 ---
 
@@ -640,16 +682,18 @@ For each Parquet file:
 
 ## Mechanism
 
-**`ingest` command:** watermark only advances after successful processing. Re-run picks up from the last watermark. If a file fails mid-processing, no watermark advance occurs, so it retries from the same point.
+**Parquet mode:** local manifest tracks completed files. Re-running skips completed files. If a file fails mid-processing, no partial output is written (flush at file boundary). Output Parquet files are only finalized after all files are processed.
 
-**Legacy commands:** file-level idempotency provides automatic restart. Re-running skips completed files. If a file fails mid-processing, no data is written (flush is at file boundary).
+**ClickHouse mode:** watermark from `ingestion_log` provides the restart point. If processing fails before the log entry is written, no watermark advances — re-run retries from the same point.
+
+**Import:** staging tables are loaded before the swap. If import fails mid-load, staging tables can be dropped and retried. The swap itself is atomic per table.
 
 ---
 
 ## Rationale
 
 * long-running batch jobs are failure-prone
-* both mechanisms provide simple, correct restart semantics
+* all three commands provide simple, correct restart semantics
 
 ---
 
@@ -660,7 +704,6 @@ For each Parquet file:
 * system must operate within bounded memory
 * must not load entire corpus into memory
 * peak memory = one Parquet file's comments + their n-gram aggregates
-* `ingest` command also holds cumulative global counts in memory
 
 ---
 
@@ -668,15 +711,15 @@ For each Parquet file:
 
 * largest monthly file: ~2M comments
 * `NgramCounter` for 2M comments: ~1-2 GB (dominated by bigram/trigram string keys)
-* cumulative global counts: bounded by vocabulary size
 * total working memory target: < 4 GB
 
 ---
 
 ## Rationale
 
-* historical backfill runs on a local development machine (not the VPS)
-* 4 GB is comfortable for a modern dev machine
+* bootstrap runs on a local dev machine with plenty of RAM
+* incremental updates on the VPS process small monthly deltas
+* 4 GB is comfortable for both environments
 
 ---
 
@@ -739,7 +782,7 @@ Agent must NOT:
 
 ## Spec (mandatory)
 
-The ingestion binary provides subcommands for each operation.
+The ingestion binary provides three subcommands.
 
 ### `ingestion download`
 
@@ -754,59 +797,48 @@ Options:
   --end <YYYY-MM>      Last month to download [default: current month]
 ```
 
-### `ingestion ingest`
+### `ingestion process`
 
-Single-pass ingestion: tokenize, update vocabulary, insert counts. Uses watermark for incremental updates.
+Tokenize, count, prune, and output results. Output mode determines behavior:
 
 ```text
-ingestion ingest [OPTIONS]
+ingestion process [OPTIONS]
 
 Options:
   --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
   --start <YYYY-MM>    First month to process [default: 2006-10]
   --end <YYYY-MM>      Last month to process [default: current month]
+  --output <MODE>      Output mode: "clickhouse" or "parquet" [default: clickhouse]
 ```
 
-### `ingestion vocabulary`
+**Parquet mode** (`--output parquet`):
+* No ClickHouse connection required
+* Builds vocabulary from scratch (two-pass)
+* Writes output to `{data-dir}/output/`
+* Processes full corpus (no watermark filtering)
 
-Legacy pass 1: build vocabulary from global counts.
+**ClickHouse mode** (`--output clickhouse`):
+* Reads watermark from `ingestion_log` table
+* Uses existing vocabulary (read-only, no expansion)
+* Inserts directly into ClickHouse
+* Logs run to `ingestion_log`
+
+### `ingestion import`
+
+Load Parquet output files into ClickHouse with atomic table swap.
 
 ```text
-ingestion vocabulary [OPTIONS]
+ingestion import [OPTIONS]
 
 Options:
-  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
-  --start <YYYY-MM>    First month to process [default: 2006-10]
-  --end <YYYY-MM>      Last month to process [default: current month]
+  --data-dir <PATH>    Directory containing output/ folder [default: ./data/hn]
 ```
 
-### `ingestion backfill`
-
-Legacy pass 2: generate daily aggregates and insert into ClickHouse. Requires vocabulary to be built first.
-
-```text
-ingestion backfill [OPTIONS]
-
-Options:
-  --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
-  --start <YYYY-MM>    First month to process [default: 2006-10]
-  --end <YYYY-MM>      Last month to process [default: current month]
-```
-
-### `ingestion status`
-
-Show current state of the manifest: tokenizer version, watermark, phase completion counts.
-
-```text
-ingestion status [OPTIONS]
-
-Options:
-  --data-dir <PATH>    [default: ./data/hn]
-```
+Reads `{data-dir}/output/manifest.json` for metadata. Creates staging tables, loads Parquet files, swaps atomically, writes `ingestion_log` entry.
 
 ### Environment
 
-ClickHouse connection is configured via environment variables (same as API):
+ClickHouse connection (for `process --output clickhouse` and `import`):
 
 ```text
 CLICKHOUSE_HOST     [default: localhost]
@@ -818,11 +850,40 @@ CLICKHOUSE_DATABASE [default: hn_ngram]
 
 ---
 
+## Operational examples
+
+### Bootstrap (local workstation → prod)
+
+```bash
+# On workstation
+ingestion download --start 2006-10 --end 2026-03
+ingestion process --output parquet --start 2006-10 --end 2026-03
+
+# Transfer to prod
+scp -r data/hn/output/ prod:/path/to/data/hn/output/
+
+# On prod
+ingestion import --data-dir /path/to/data/hn
+```
+
+### Incremental update (on prod VPS)
+
+```bash
+ingestion download --start 2026-03 --end 2026-03
+ingestion process --start 2026-03 --end 2026-03
+```
+
+### Full rebuild
+
+Same as bootstrap. `import` does a full swap — the new data completely replaces the old. Run `process` after import to fill any gap between the bootstrap end date and now.
+
+---
+
 ## Rationale
 
-* `ingest` is the recommended single command for most use cases
-* `vocabulary` + `backfill` remain for explicit control during full rebuilds
-* reasonable defaults mean `ingestion download && ingestion ingest` works out of the box
+* three commands cover the full lifecycle with no redundancy
+* `process` with output flag avoids duplicating core logic
+* reasonable defaults mean `ingestion download && ingestion process` works out of the box
 * `--start`/`--end` allows processing a subset for testing
 
 ---
@@ -833,28 +894,21 @@ CLICKHOUSE_DATABASE [default: hn_ngram]
 
 All output goes to stderr via `tracing` (structured logging).
 
-### Per-file progress (`ingest`)
+### Per-file progress
 
 ```text
-[INFO] Ingesting: data/2024/2024-01.parquet (1/12) — 1,832,451 new comments
-[INFO]   Comments: 1832451 | Counts: 234567 | Totals: 90 | Vocab: +2345 | Elapsed: 12.3s
+[INFO] Processing: data/2024/2024-01.parquet (1/12) — 1,832,451 comments
+[INFO]   Comments: 1832451 | Counts: 234567 | Totals: 90 | Elapsed: 12.3s
 ```
 
-### Per-file progress (legacy)
-
-```text
-[INFO] Phase 1: data/2024/2024-01.parquet (1/244)
-[INFO]   data/2024/2024-01.parquet — Comments: 1832451 | Unique n-grams: 9876543 | Elapsed: 12.3s
-```
-
-### Phase summary (legacy)
+### Vocabulary build (parquet mode)
 
 ```text
 [INFO] Global counts: 1234567 unigrams, 12345678 bigram candidates, 8765432 trigram candidates
 [INFO] Admitted: 456789 bigrams (of 12345678), 123456 trigrams (of 8765432)
 ```
 
-### Watermark display
+### Watermark display (clickhouse mode)
 
 ```text
 [INFO] Watermark: 1705318200000 (2024-01-15)
@@ -864,6 +918,14 @@ All output goes to stderr via `tracing` (structured logging).
 
 ```text
 [INFO] Downloading data/2024/2024-01.parquet (142/244) ... 45.2 MB in 3.1s
+```
+
+### Import progress
+
+```text
+[INFO] Loading ngram_counts.parquet into staging ... 12,345,678 rows in 8.2s
+[INFO] Swapping ngram_counts ... done
+[INFO] Ingestion log entry written — watermark: 1711584000000
 ```
 
 ---
@@ -882,12 +944,13 @@ Pipeline is valid if:
 
 * produces correct aggregates matching RFC-002 golden tests
 * respects pruning rules (per-bucket + global vocabulary)
-* guarantees idempotency via watermark and/or file-level manifest
+* guarantees idempotency via watermark and/or atomic swap
 * scales to full 41M-comment dataset
 * operates within bounded memory (< 4 GB)
 * produces deterministic output
-* completes full backfill in reasonable time (< 2 hours target)
-* supports incremental updates via watermark (no re-processing)
+* completes full processing in reasonable time (< 2 hours target)
+* Parquet output can be imported with atomic swap on a fresh ClickHouse instance
+* incremental updates via ClickHouse mode process only new comments
 
 ---
 
