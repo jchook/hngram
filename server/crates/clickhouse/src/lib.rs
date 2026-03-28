@@ -20,6 +20,8 @@ pub const DATABASE: &str = "hn_ngram";
 pub const TABLE_NGRAM_COUNTS: &str = "ngram_counts";
 pub const TABLE_BUCKET_TOTALS: &str = "bucket_totals";
 pub const TABLE_NGRAM_VOCABULARY: &str = "ngram_vocabulary";
+pub const TABLE_GLOBAL_COUNTS: &str = "global_counts";
+pub const TABLE_INGESTION_LOG: &str = "ingestion_log";
 
 // ============================================================================
 // API Constants (RFC-005)
@@ -95,6 +97,31 @@ pub struct NgramVocabularyRow {
     pub global_count: u64,
     #[serde(with = "clickhouse::serde::time::datetime")]
     pub admitted_at: OffsetDateTime,
+}
+
+/// Row in `ingestion_log` table.
+/// Omits `id` and `created_at` — ClickHouse provides defaults via generateUUIDv7() and now64().
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct IngestionLogRow {
+    pub tokenizer_version: String,
+    pub command: String,
+    pub last_ingested_ts: i64,
+    pub comments_processed: u64,
+    pub ngram_counts_inserted: u64,
+    pub bucket_totals_inserted: u64,
+    pub vocabulary_inserted: u64,
+    pub start_month: String,
+    pub end_month: String,
+    pub duration_ms: u64,
+}
+
+/// Row in `global_counts` table.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct GlobalCountRow {
+    pub tokenizer_version: String,
+    pub n: u8,
+    pub ngram: String,
+    pub count: u64,
 }
 
 // ============================================================================
@@ -219,25 +246,31 @@ impl HnClickHouse {
 
     /// Insert n-gram counts in batch
     pub async fn insert_ngram_counts(&self, rows: &[NgramCountRow]) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-
-        let mut insert = self.client.insert(TABLE_NGRAM_COUNTS)?;
-        for row in rows {
-            insert.write(row).await?;
-        }
-        insert.end().await?;
-        Ok(())
+        self.insert_ngram_counts_to(TABLE_NGRAM_COUNTS, rows).await
     }
 
     /// Insert bucket totals in batch
     pub async fn insert_bucket_totals(&self, rows: &[BucketTotalRow]) -> Result<()> {
+        self.insert_bucket_totals_to(TABLE_BUCKET_TOTALS, rows)
+            .await
+    }
+
+    /// Insert vocabulary entries in batch
+    pub async fn insert_vocabulary(&self, rows: &[NgramVocabularyRow]) -> Result<()> {
+        self.insert_vocabulary_to(TABLE_NGRAM_VOCABULARY, rows).await
+    }
+
+    /// Insert vocabulary entries into a specific table (e.g., staging)
+    pub async fn insert_vocabulary_to(
+        &self,
+        table: &str,
+        rows: &[NgramVocabularyRow],
+    ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(TABLE_BUCKET_TOTALS)?;
+        let mut insert = self.client.insert(table)?;
         for row in rows {
             insert.write(row).await?;
         }
@@ -245,13 +278,174 @@ impl HnClickHouse {
         Ok(())
     }
 
-    /// Insert vocabulary entries in batch
-    pub async fn insert_vocabulary(&self, rows: &[NgramVocabularyRow]) -> Result<()> {
+    /// Insert a single ingestion log entry
+    pub async fn insert_ingestion_log(&self, row: &IngestionLogRow) -> Result<()> {
+        let mut insert = self.client.insert(TABLE_INGESTION_LOG)?;
+        insert.write(row).await?;
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Get the latest watermark (last_ingested_ts) from the ingestion log.
+    /// Returns None if no entries exist for the current tokenizer version.
+    pub async fn get_latest_watermark(&self) -> Result<Option<i64>> {
+        let query = format!(
+            r#"
+            SELECT last_ingested_ts
+            FROM {TABLE_INGESTION_LOG}
+            WHERE tokenizer_version = ?
+            ORDER BY id DESC
+            LIMIT 1
+            "#
+        );
+
+        let result: Option<i64> = self
+            .client
+            .query(&query)
+            .bind(&self.tokenizer_version)
+            .fetch_optional()
+            .await?;
+
+        Ok(result)
+    }
+
+    /// Check if data exists for a different tokenizer version.
+    /// Returns the other version string if found, None if clean.
+    pub async fn check_other_tokenizer_versions(&self) -> Result<Option<String>> {
+        #[derive(Row, Deserialize)]
+        struct VersionRow {
+            tokenizer_version: String,
+        }
+        let query = format!(
+            r#"
+            SELECT DISTINCT tokenizer_version
+            FROM {TABLE_INGESTION_LOG}
+            WHERE tokenizer_version != ?
+            LIMIT 1
+            "#
+        );
+        let result: Option<VersionRow> = self
+            .client
+            .query(&query)
+            .bind(&self.tokenizer_version)
+            .fetch_optional()
+            .await?;
+        Ok(result.map(|r| r.tokenizer_version))
+    }
+
+    /// Load global counts from ClickHouse.
+    pub async fn load_global_counts(&self) -> Result<HashMap<(u8, String), u64>> {
+        let query = format!(
+            r#"
+            SELECT n, ngram, count
+            FROM {TABLE_GLOBAL_COUNTS} FINAL
+            WHERE tokenizer_version = ?
+            "#
+        );
+
+        let rows: Vec<GlobalCountRow> = self
+            .client
+            .query(&query)
+            .bind(&self.tokenizer_version)
+            .fetch_all()
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ((r.n, r.ngram), r.count))
+            .collect())
+    }
+
+    /// Insert global counts in batch.
+    pub async fn insert_global_counts(&self, rows: &[GlobalCountRow]) -> Result<()> {
+        self.insert_global_counts_to(TABLE_GLOBAL_COUNTS, rows)
+            .await
+    }
+
+    /// Insert global counts into a specific table (e.g., staging).
+    pub async fn insert_global_counts_to(
+        &self,
+        table: &str,
+        rows: &[GlobalCountRow],
+    ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(TABLE_NGRAM_VOCABULARY)?;
+        let mut insert = self.client.insert(table)?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // DDL / Raw SQL (for import)
+    // ========================================================================
+
+    /// Execute arbitrary SQL (for DDL statements like CREATE, DROP, EXCHANGE)
+    pub async fn execute_sql(&self, sql: &str) -> Result<()> {
+        self.client.query(sql).execute().await?;
+        Ok(())
+    }
+
+    /// Create a staging table with the same schema as the source table.
+    /// Truncates if the staging table already exists.
+    pub async fn create_staging_table(&self, table: &str) -> Result<()> {
+        let staging = format!("{}_staging", table);
+        self.execute_sql(&format!("CREATE TABLE IF NOT EXISTS {} AS {}", staging, table))
+            .await?;
+        self.execute_sql(&format!("TRUNCATE TABLE {}", staging))
+            .await?;
+        Ok(())
+    }
+
+    /// Atomically swap a table with its staging counterpart.
+    pub async fn exchange_tables(&self, table: &str) -> Result<()> {
+        let staging = format!("{}_staging", table);
+        self.execute_sql(&format!("EXCHANGE TABLES {} AND {}", table, staging))
+            .await?;
+        Ok(())
+    }
+
+    /// Drop a staging table.
+    pub async fn drop_staging_table(&self, table: &str) -> Result<()> {
+        let staging = format!("{}_staging", table);
+        self.execute_sql(&format!("DROP TABLE IF EXISTS {}", staging))
+            .await?;
+        Ok(())
+    }
+
+    /// Insert ngram counts into a specific table (e.g., staging)
+    pub async fn insert_ngram_counts_to(
+        &self,
+        table: &str,
+        rows: &[NgramCountRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert(table)?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Insert bucket totals into a specific table (e.g., staging)
+    pub async fn insert_bucket_totals_to(
+        &self,
+        table: &str,
+        rows: &[BucketTotalRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert(table)?;
         for row in rows {
             insert.write(row).await?;
         }

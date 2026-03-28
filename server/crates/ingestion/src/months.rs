@@ -1,6 +1,7 @@
 //! Month range utilities for iterating over YYYY-MM file partitions.
 
 use anyhow::{bail, Context};
+use time::macros::format_description;
 
 /// A year-month pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,6 +73,12 @@ impl std::fmt::Display for YearMonth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}-{:02}", self.year, self.month)
     }
+}
+
+/// Parse a "YYYY-MM-DD" bucket string into a `time::Date`.
+pub fn parse_bucket_date(s: &str) -> anyhow::Result<time::Date> {
+    let format = format_description!("[year]-[month]-[day]");
+    time::Date::parse(s, format).with_context(|| format!("Invalid bucket date: '{}'", s))
 }
 
 /// Generate an inclusive range of months from start to end.

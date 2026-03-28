@@ -55,20 +55,25 @@ The `generate_openapi` binary lives at `server/crates/api/src/bin/generate_opena
 
 ### Ingestion pipeline
 
-Two-phase pipeline: vocabulary (build admitted n-gram list) then backfill (insert daily counts).
+Three subcommands: download raw data, process it, and (for bootstrap) import into ClickHouse.
 
 ```bash
 cd server
-cargo run -p ingestion -- download                    # Fetch Parquet from HuggingFace
-cargo run -p ingestion -- vocabulary                  # Build/update vocabulary
-cargo run -p ingestion -- backfill                    # Insert counts to ClickHouse
-cargo run -p ingestion -- status                      # Check progress
-# Use --start 2024-01 --end 2024-03 to process a subset
+# Bootstrap (on local workstation, no ClickHouse needed):
+cargo run -p ingestion -- download                                        # Fetch Parquet from HuggingFace
+cargo run -p ingestion -- process --output parquet                        # Full corpus → output/*.parquet
+# Transfer output/ to prod, then:
+cargo run -p ingestion -- import                                          # Load parquet → staging → atomic swap
+
+# Incremental (on prod VPS, direct to ClickHouse):
+cargo run -p ingestion -- download --start 2026-03 --end 2026-03          # Fetch latest month
+cargo run -p ingestion -- process --start 2026-03 --end 2026-03           # Process new comments
+# Use --start/--end to scope to a subset of months
 ```
 
-Both commands are safe to re-run. Vocabulary generates partial counts only for new months, then re-merges all partials and updates admissions. Backfill skips months already processed. State is tracked in `data/hn/manifest.json`.
+`process --output parquet` runs the full corpus from scratch (two-pass: build vocabulary, then filter and write). `process --output clickhouse` (default) is incremental — reads watermark from `ingestion_log` table, processes only new comments, inserts directly.
 
-Data is append-only — vocabulary and counts only grow, never shrink or get reprocessed.
+All state on prod lives in ClickHouse (no local manifest files). Data is append-only — vocabulary and counts only grow. Eventual consistency via ReplacingMergeTree is acceptable everywhere.
 
 ### Environment
 
@@ -151,7 +156,6 @@ Defined in: `server/crates/tokenizer/src/lib.rs`
 | API server startup | `server/crates/api/src/main.rs` |
 | OpenAPI generator | `server/crates/api/src/bin/generate_openapi.rs` |
 | Ingestion pipeline | `server/crates/ingestion/src/` |
-| Ingestion manifest | `server/data/hn/manifest.json` |
 | Frontend app | `client/src/App.tsx` |
 | URL state management | `client/src/features/query/useQueryState.ts` |
 | Data transforms | `client/src/features/chart/transforms.ts` |

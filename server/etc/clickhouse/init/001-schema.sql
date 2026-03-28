@@ -43,3 +43,37 @@ CREATE TABLE IF NOT EXISTS hn_ngram.ngram_vocabulary
 )
 ENGINE = ReplacingMergeTree(admitted_at)
 ORDER BY (tokenizer_version, n, ngram);
+
+-- Global n-gram counts for vocabulary admission decisions.
+-- Tracks total corpus-wide count per (n, ngram) across all ingestion runs.
+-- ReplacingMergeTree keeps the highest count on dedup.
+CREATE TABLE IF NOT EXISTS hn_ngram.global_counts
+(
+    tokenizer_version LowCardinality(String),
+    n UInt8,
+    ngram String,
+    count UInt64
+)
+ENGINE = ReplacingMergeTree(count)
+ORDER BY (tokenizer_version, n, ngram);
+
+-- Ingestion log table
+-- Append-only audit trail of ingestion runs. Tracks watermark for incremental processing.
+-- UUIDv7 is time-sortable, so ORDER BY id DESC LIMIT 1 gives the latest entry.
+CREATE TABLE IF NOT EXISTS hn_ngram.ingestion_log
+(
+    id UUID DEFAULT generateUUIDv7(),
+    tokenizer_version LowCardinality(String),
+    command LowCardinality(String),
+    last_ingested_ts Int64,
+    comments_processed UInt64,
+    ngram_counts_inserted UInt64,
+    bucket_totals_inserted UInt64,
+    vocabulary_inserted UInt64,
+    start_month String,
+    end_month String,
+    duration_ms UInt64,
+    created_at DateTime64(3, 'UTC') DEFAULT now64()
+)
+ENGINE = MergeTree()
+ORDER BY id;

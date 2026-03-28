@@ -1,27 +1,23 @@
 //! HN N-gram ingestion pipeline (RFC-004)
 //!
 //! Subcommands:
-//!   download   — fetch Parquet files from HuggingFace
-//!   ingest     — single-pass: tokenize, update vocabulary, insert counts
-//!   vocabulary — (legacy) pass 1: build vocabulary from global counts
-//!   backfill   — (legacy) pass 2: generate daily aggregates, insert to ClickHouse
-//!   status     — show manifest state
+//!   download — fetch Parquet files from HuggingFace
+//!   process  — tokenize, count, prune → ClickHouse (default) or Parquet files
+//!   import   — load Parquet output into ClickHouse with atomic table swap
 
-mod backfill;
 mod download;
-mod ingest;
-mod manifest;
+mod import;
 mod months;
 mod parquet;
+mod process;
 mod vocabulary;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use hn_clickhouse::HnClickHouse;
-use manifest::Manifest;
 use months::{month_range, YearMonth};
+use process::OutputMode;
 use std::path::PathBuf;
-use time::OffsetDateTime;
 use tokenizer::TOKENIZER_VERSION;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -47,8 +43,8 @@ enum Command {
         end: Option<String>,
     },
 
-    /// Build vocabulary from global n-gram counts (pass 1)
-    Vocabulary {
+    /// Tokenize, count, prune, and output results
+    Process {
         /// Directory with downloaded Parquet files
         #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
@@ -58,40 +54,23 @@ enum Command {
         /// Last month to process (YYYY-MM, default: current month)
         #[arg(long)]
         end: Option<String>,
+        /// Output mode: "clickhouse" (default) or "parquet"
+        #[arg(long, default_value = "clickhouse")]
+        output: OutputArg,
     },
 
-    /// Single-pass ingestion: tokenize, update vocabulary, insert counts
-    Ingest {
-        /// Directory with downloaded Parquet files
-        #[arg(long, default_value = "./data/hn")]
-        data_dir: PathBuf,
-        /// First month to process (YYYY-MM)
-        #[arg(long, default_value = "2006-10")]
-        start: String,
-        /// Last month to process (YYYY-MM, default: current month)
-        #[arg(long)]
-        end: Option<String>,
-    },
-
-    /// Generate daily aggregates and insert into ClickHouse (pass 2)
-    Backfill {
-        /// Directory with downloaded Parquet files
-        #[arg(long, default_value = "./data/hn")]
-        data_dir: PathBuf,
-        /// First month to process (YYYY-MM)
-        #[arg(long, default_value = "2006-10")]
-        start: String,
-        /// Last month to process (YYYY-MM, default: current month)
-        #[arg(long)]
-        end: Option<String>,
-    },
-
-    /// Show current manifest state
-    Status {
-        /// Data directory
+    /// Load Parquet output into ClickHouse with atomic table swap
+    Import {
+        /// Directory containing output/ folder
         #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum OutputArg {
+    Clickhouse,
+    Parquet,
 }
 
 fn parse_end(end: &Option<String>) -> anyhow::Result<YearMonth> {
@@ -136,94 +115,48 @@ async fn main() -> anyhow::Result<()> {
             download::download(&data_dir, &months).await?;
         }
 
-        Command::Ingest {
+        Command::Process {
             data_dir,
             start,
             end,
+            output,
         } => {
             let start = YearMonth::parse(&start)?;
             let end = parse_end(&end)?;
             let months = month_range(start, end);
 
-            let mut manifest = Manifest::load(&data_dir)?;
-            manifest.validate_version()?;
+            let mode = match output {
+                OutputArg::Clickhouse => OutputMode::ClickHouse,
+                OutputArg::Parquet => OutputMode::Parquet,
+            };
 
-            tracing::info!(
-                "Ingesting {} months ({} to {})",
-                months.len(),
-                start,
-                end
-            );
-
-            let ch = HnClickHouse::from_env();
-            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
-            ingest::ingest(&data_dir, &months, &mut manifest, &ch).await?;
-        }
-
-        Command::Vocabulary {
-            data_dir,
-            start,
-            end,
-        } => {
-            let start = YearMonth::parse(&start)?;
-            let end = parse_end(&end)?;
-            let months = month_range(start, end);
-
-            let mut manifest = Manifest::load(&data_dir)?;
-            manifest.validate_version()?;
-
-            tracing::info!(
-                "Building vocabulary from {} files ({} to {})",
-                months.len(),
-                start,
-                end
-            );
-
-            let ch = HnClickHouse::from_env();
-            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
-            vocabulary::build_vocabulary_phase(&data_dir, &months, &mut manifest, &ch).await?;
-        }
-
-        Command::Backfill {
-            data_dir,
-            start,
-            end,
-        } => {
-            let start = YearMonth::parse(&start)?;
-            let end = parse_end(&end)?;
-            let months = month_range(start, end);
-
-            let mut manifest = Manifest::load(&data_dir)?;
-            manifest.validate_version()?;
-
-            tracing::info!(
-                "Backfilling {} files ({} to {})",
-                months.len(),
-                start,
-                end
-            );
-
-            let ch = HnClickHouse::from_env();
-            ch.ping().await.context("Cannot connect to ClickHouse — is it running?")?;
-            backfill::backfill_phase(&data_dir, &months, &mut manifest, &ch).await?;
-        }
-
-        Command::Status { data_dir } => {
-            let manifest = Manifest::load(&data_dir)?;
-            println!("Manifest: {}", data_dir.join("manifest.json").display());
-            println!("Tokenizer version: {}", manifest.tokenizer_version);
-            println!("Vocabulary built: {}", manifest.vocabulary_built);
-            if manifest.last_ingested_ts > 0 {
-                let dt = OffsetDateTime::from_unix_timestamp_nanos(
-                    (manifest.last_ingested_ts as i128) * 1_000_000,
-                )
-                .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                println!("Watermark: {} ({})", manifest.last_ingested_ts, dt.date());
+            let ch = if mode == OutputMode::ClickHouse {
+                let ch = HnClickHouse::from_env();
+                ch.ping()
+                    .await
+                    .context("Cannot connect to ClickHouse — is it running?")?;
+                Some(ch)
             } else {
-                println!("Watermark: none");
-            }
-            println!("Phase 1 completed files: {}", manifest.phase1_count());
-            println!("Phase 2 completed files: {}", manifest.phase2_count());
+                None
+            };
+
+            tracing::info!(
+                "Processing {} months ({} to {}) → {:?}",
+                months.len(),
+                start,
+                end,
+                mode,
+            );
+
+            process::process(&data_dir, &months, &start, &end, mode, ch.as_ref()).await?;
+        }
+
+        Command::Import { data_dir } => {
+            let ch = HnClickHouse::from_env();
+            ch.ping()
+                .await
+                .context("Cannot connect to ClickHouse — is it running?")?;
+            import::import(&data_dir, &ch).await?;
         }
     }
 
