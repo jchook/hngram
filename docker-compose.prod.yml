@@ -1,5 +1,12 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   caddy:
+    logging: *default-logging
     build:
       context: .
       dockerfile: server/etc/caddy/Dockerfile
@@ -14,7 +21,11 @@ services:
     restart: unless-stopped
 
   api:
+    logging: *default-logging
     init: true
+    read_only: true
+    tmpfs:
+      - /tmp
     build:
       context: ./server
       dockerfile: Dockerfile
@@ -31,6 +42,7 @@ services:
     restart: unless-stopped
 
   clickhouse:
+    logging: *default-logging
     init: true
     image: clickhouse/clickhouse-server:24.3-alpine
     secrets:
