@@ -44,7 +44,7 @@ services:
   clickhouse:
     logging: *default-logging
     init: true
-    image: clickhouse/clickhouse-server:24.3-alpine
+    image: clickhouse/clickhouse-server:26.3-alpine
     secrets:
       - clickhouse_password
     volumes:
