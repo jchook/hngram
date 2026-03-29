@@ -34,9 +34,12 @@ pub struct IngestionConfig {
 /// `[process]` section.
 #[derive(Debug, Default, Deserialize)]
 pub struct ProcessSection {
+    pub start: Option<String>,
+    pub end: Option<String>,
     pub output: Option<String>,
     pub max_entries: Option<usize>,
     pub producer_count: Option<usize>,
+    pub merge_shards: Option<usize>,
     pub prune: Option<HashMap<String, PruneThreshold>>,
 }
 

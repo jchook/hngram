@@ -1,16 +1,24 @@
-//! Partial file I/O and k-way sorted merge for ingestion.
+//! Sharded binary partial file I/O and parallel merge for ingestion.
 //!
-//! Three partial file types:
-//! - `.globals`  — (n, ngram, global_count) for vocabulary admission
-//! - `.counts`   — (bucket, n, ngram, count) for per-bucket n-gram counts
-//! - `.totals`   — (bucket, n, total) for per-bucket denominators
+//! During source processing, n-gram counts are flushed to sharded binary partial
+//! files. Each entry is routed to a shard by `hash(key) % num_shards`, guaranteeing
+//! all occurrences of a given key land in the same shard.
+//!
+//! At merge time, each shard is processed independently in parallel (rayon),
+//! aggregating counts into a HashMap. Globals and totals are derived from counts.
+//!
+//! Binary record format (counts):
+//!   [bucket_len:u16][bucket:bytes][n:u8][ngram_len:u16][ngram:bytes][count:u32]
 
 use anyhow::Context;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
-use std::io::{BufRead, Write};
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use tokenizer::counter::{BucketKey, NgramKey};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokenizer::counter::NgramKey;
 
 // ============================================================================
 // Directory and path helpers
@@ -20,10 +28,7 @@ pub fn partial_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("partial")
 }
 
-pub fn numbered_partial_path(data_dir: &Path, index: u32, ext: &str) -> PathBuf {
-    partial_dir(data_dir).join(format!("{:04}.{}", index, ext))
-}
-
+/// Compute the next partial counter by scanning existing files.
 pub fn next_partial_counter(data_dir: &Path) -> u32 {
     let dir = partial_dir(data_dir);
     if !dir.exists() {
@@ -32,8 +37,11 @@ pub fn next_partial_counter(data_dir: &Path) -> u32 {
     let mut max_num: u32 = 0;
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
-                if let Ok(num) = stem.parse::<u32>() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Files are named NNNN.sNN — extract the prefix before first '.'
+            if let Some(prefix) = name.split('.').next() {
+                if let Ok(num) = prefix.parse::<u32>() {
                     max_num = max_num.max(num + 1);
                 }
             }
@@ -88,372 +96,211 @@ pub fn append_done_files(data_dir: &Path, files: &[String]) -> anyhow::Result<()
     Ok(())
 }
 
-fn find_files_with_ext(data_dir: &Path, ext: &str) -> anyhow::Result<Vec<PathBuf>> {
+// ============================================================================
+// Shard path helpers
+// ============================================================================
+
+/// Path for a shard file: `partial/NNNN.sNN`
+fn shard_path(data_dir: &Path, index: u32, shard: usize, num_shards: usize) -> PathBuf {
+    let width = num_shards.to_string().len();
+    partial_dir(data_dir).join(format!("{:04}.s{:0>width$}", index, shard))
+}
+
+/// Temp path for atomic write: `partial/NNNN.sNN.tmp`
+fn shard_tmp_path(data_dir: &Path, index: u32, shard: usize, num_shards: usize) -> PathBuf {
+    let width = num_shards.to_string().len();
+    partial_dir(data_dir).join(format!("{:04}.s{:0>width$}.tmp", index, shard))
+}
+
+/// Find all partial files for a given shard index.
+/// Returns files matching `partial/*.sNN` sorted by name.
+fn find_shard_files(data_dir: &Path, shard: usize, num_shards: usize) -> anyhow::Result<Vec<PathBuf>> {
     let dir = partial_dir(data_dir);
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let width = num_shards.to_string().len();
+    let suffix = format!(".s{:0>width$}", shard);
     let mut paths: Vec<PathBuf> = Vec::new();
-    collect_files_recursive(&dir, ext, &mut paths)?;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(&suffix) && !name.ends_with(".tmp") {
+            paths.push(entry.path());
+        }
+    }
     paths.sort();
     Ok(paths)
 }
 
-fn collect_files_recursive(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_recursive(&path, ext, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            out.push(path);
-        }
+// ============================================================================
+// Binary I/O helpers
+// ============================================================================
+
+fn write_str(w: &mut impl Write, s: &str) -> std::io::Result<()> {
+    w.write_all(&(s.len() as u16).to_le_bytes())?;
+    w.write_all(s.as_bytes())
+}
+
+fn write_u8(w: &mut impl Write, v: u8) -> std::io::Result<()> {
+    w.write_all(&[v])
+}
+
+fn write_u32(w: &mut impl Write, v: u32) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+
+/// Read a length-prefixed string. Returns None on EOF (before the length prefix).
+fn read_str(r: &mut impl Read, buf: &mut Vec<u8>) -> std::io::Result<Option<String>> {
+    let mut len_buf = [0u8; 2];
+    match r.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
     }
-    Ok(())
+    let len = u16::from_le_bytes(len_buf) as usize;
+    buf.resize(len, 0);
+    r.read_exact(&mut buf[..len])?;
+    String::from_utf8(buf[..len].to_vec())
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn read_u8(r: &mut impl Read) -> std::io::Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
+}
+
+fn read_u32(r: &mut impl Read) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
 }
 
 // ============================================================================
-// Write sorted partial files
+// Sharded binary write
 // ============================================================================
 
-fn atomic_write<F>(path: &Path, tmp_ext: &str, write_fn: F) -> anyhow::Result<()>
-where
-    F: FnOnce(&mut std::io::BufWriter<std::fs::File>) -> anyhow::Result<()>,
-{
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(tmp_ext);
-    let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-    write_fn(&mut file)?;
-    file.flush()?;
-    drop(file);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+/// Compute shard index for an NgramKey.
+fn shard_for_key(key: &NgramKey, num_shards: usize) -> usize {
+    let mut hasher = std::hash::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % num_shards
 }
 
-/// Write global counts sorted by (n, ngram). Format: n\tngram\tcount\n
-pub fn write_globals(path: &Path, counts: &HashMap<(u8, String), u64>) -> anyhow::Result<()> {
-    let mut entries: Vec<_> = counts.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    atomic_write(path, "globals.tmp", |file| {
-        for ((n, ngram), count) in entries {
-            writeln!(file, "{}\t{}\t{}", n, ngram, count)?;
-        }
-        Ok(())
-    })
-}
+/// Write counts to sharded binary partial files.
+///
+/// Each entry is routed to `shard = hash(key) % num_shards`.
+/// Files are written atomically (write to .tmp, then rename).
+pub fn write_sharded(
+    data_dir: &Path,
+    index: u32,
+    num_shards: usize,
+    counts: &HashMap<NgramKey, u32>,
+) -> anyhow::Result<()> {
+    let p_dir = partial_dir(data_dir);
+    std::fs::create_dir_all(&p_dir)?;
 
-/// Write per-bucket counts sorted by (bucket, n, ngram). Format: bucket\tn\tngram\tcount\n
-pub fn write_counts(path: &Path, counts: &HashMap<NgramKey, u32>) -> anyhow::Result<()> {
-    let mut entries: Vec<_> = counts.iter().collect();
-    entries.sort_by(|a, b| {
-        a.0.bucket
-            .cmp(&b.0.bucket)
-            .then(a.0.n.cmp(&b.0.n))
-            .then(a.0.ngram.cmp(&b.0.ngram))
-    });
-    atomic_write(path, "counts.tmp", |file| {
-        for (key, count) in entries {
-            writeln!(file, "{}\t{}\t{}\t{}", key.bucket, key.n, key.ngram, count)?;
-        }
-        Ok(())
-    })
-}
-
-/// Write per-bucket totals sorted by (bucket, n). Format: bucket\tn\ttotal\n
-pub fn write_totals(path: &Path, totals: &HashMap<BucketKey, u64>) -> anyhow::Result<()> {
-    let mut entries: Vec<_> = totals.iter().collect();
-    entries.sort_by(|a, b| a.0.bucket.cmp(&b.0.bucket).then(a.0.n.cmp(&b.0.n)));
-    atomic_write(path, "totals.tmp", |file| {
-        for (key, total) in entries {
-            writeln!(file, "{}\t{}\t{}", key.bucket, key.n, total)?;
-        }
-        Ok(())
-    })
-}
-
-// ============================================================================
-// Reusable k-way merge
-// ============================================================================
-
-fn read_next_line(
-    reader: &mut std::io::BufReader<std::fs::File>,
-    buf: &mut String,
-) -> anyhow::Result<Option<String>> {
-    buf.clear();
-    let bytes = reader.read_line(buf)?;
-    if bytes == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(buf.trim_end().to_string()))
-    }
-}
-
-struct KWayMerge {
-    readers: Vec<std::io::BufReader<std::fs::File>>,
-    bufs: Vec<String>,
-    heap: BinaryHeap<Reverse<(String, usize)>>,
-    /// Total bytes across all input files (for progress reporting).
-    total_bytes: u64,
-    /// Bytes consumed so far (approximated by line lengths).
-    bytes_read: u64,
-    /// Last reported progress percentage (to avoid spamming logs).
-    last_reported_pct: u8,
-}
-
-impl KWayMerge {
-    fn new(paths: &[PathBuf]) -> anyhow::Result<Self> {
-        let mut readers = Vec::with_capacity(paths.len());
-        let mut bufs = Vec::with_capacity(paths.len());
-        let mut heap = BinaryHeap::new();
-        let mut total_bytes = 0u64;
-
-        for (i, path) in paths.iter().enumerate() {
-            total_bytes += std::fs::metadata(path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let file = std::fs::File::open(path)
-                .with_context(|| format!("Failed to open {}", path.display()))?;
-            let mut reader = std::io::BufReader::new(file);
-            let mut buf = String::new();
-
-            if let Some(line) = read_next_line(&mut reader, &mut buf)? {
-                heap.push(Reverse((line, i)));
-            }
-
-            readers.push(reader);
-            bufs.push(buf);
-        }
-
-        Ok(Self {
-            readers,
-            bufs,
-            heap,
-            total_bytes,
-            bytes_read: 0,
-            last_reported_pct: 0,
+    // Open all shard writers
+    let mut writers: Vec<BufWriter<std::fs::File>> = (0..num_shards)
+        .map(|shard| {
+            let tmp = shard_tmp_path(data_dir, index, shard, num_shards);
+            let file = std::fs::File::create(&tmp)
+                .with_context(|| format!("Failed to create {}", tmp.display()))
+                .unwrap();
+            BufWriter::new(file)
         })
+        .collect();
+
+    // Write each entry to its shard
+    for (key, &count) in counts {
+        let shard = shard_for_key(key, num_shards);
+        let w = &mut writers[shard];
+        write_str(w, &key.bucket)?;
+        write_u8(w, key.n)?;
+        write_str(w, &key.ngram)?;
+        write_u32(w, count)?;
     }
 
-    fn pop(&mut self) -> anyhow::Result<Option<String>> {
-        if let Some(Reverse((line, idx))) = self.heap.pop() {
-            // +1 for the newline character
-            self.bytes_read += line.len() as u64 + 1;
-            if let Some(next) = read_next_line(&mut self.readers[idx], &mut self.bufs[idx])? {
-                self.heap.push(Reverse((next, idx)));
-            }
-            Ok(Some(line))
-        } else {
-            Ok(None)
-        }
+    // Flush and rename all shards atomically
+    for (shard, writer) in writers.into_iter().enumerate() {
+        drop(writer); // flush via BufWriter drop
+        let tmp = shard_tmp_path(data_dir, index, shard, num_shards);
+        let final_path = shard_path(data_dir, index, shard, num_shards);
+        std::fs::rename(&tmp, &final_path)?;
     }
 
-    fn peek_line(&self) -> Option<&str> {
-        self.heap.peek().map(|Reverse((line, _))| line.as_str())
-    }
-
-    /// Log progress at 10% increments. Returns true if progress was logged.
-    fn log_progress(&mut self, label: &str) -> bool {
-        if self.total_bytes == 0 {
-            return false;
-        }
-        let pct = (self.bytes_read * 100 / self.total_bytes).min(100) as u8;
-        let bucket = pct / 10 * 10; // round down to nearest 10%
-        if bucket > self.last_reported_pct && bucket < 100 {
-            self.last_reported_pct = bucket;
-            tracing::info!("  {} merge: {}%", label, bucket);
-            return true;
-        }
-        false
-    }
-}
-
-/// Split a TSV line into key prefix (everything before last tab) and value (after last tab).
-fn split_key_value(line: &str) -> (&str, &str) {
-    match line.rfind('\t') {
-        Some(pos) => (&line[..pos], &line[pos + 1..]),
-        None => (line, ""),
-    }
-}
-
-// ============================================================================
-// Globals merge
-// ============================================================================
-
-pub struct MergedGlobal {
-    pub n: u8,
-    pub ngram: String,
-    pub count: u64,
-}
-
-pub fn merge_globals_streaming<F>(data_dir: &Path, mut callback: F) -> anyhow::Result<()>
-where
-    F: FnMut(MergedGlobal) -> anyhow::Result<()>,
-{
-    let paths = find_files_with_ext(data_dir, "globals")?;
-    if paths.is_empty() {
-        tracing::warn!("No .globals partial files found");
-        return Ok(());
-    }
-
-    tracing::info!("Streaming merge of {} .globals files", paths.len());
-    let mut merger = KWayMerge::new(&paths)?;
-    let mut merged_count = 0u64;
-
-    while let Some(line) = merger.pop()? {
-        let (key, val) = split_key_value(&line);
-        let mut total: u64 = val.parse().unwrap_or(0);
-
-        // Sum all lines with the same key prefix
-        while let Some(peek) = merger.peek_line() {
-            let (peek_key, _) = split_key_value(peek);
-            if peek_key != key {
-                break;
-            }
-            let next = merger.pop()?.unwrap();
-            let (_, v) = split_key_value(&next);
-            total += v.parse::<u64>().unwrap_or(0);
-        }
-
-        // Parse key: "n\tngram"
-        if let Some(tab) = key.find('\t') {
-            let n: u8 = key[..tab].parse().unwrap_or(0);
-            let ngram = key[tab + 1..].to_string();
-            if n >= 1 && n <= 3 {
-                callback(MergedGlobal {
-                    n,
-                    ngram,
-                    count: total,
-                })?;
-                merged_count += 1;
-            }
-        }
-
-        merger.log_progress("Globals");
-    }
-
-    tracing::info!("Globals merge complete — {} unique n-grams", merged_count);
     Ok(())
 }
 
 // ============================================================================
-// Counts merge
+// Parallel shard merge
 // ============================================================================
 
-pub struct MergedCount {
-    pub bucket: String,
-    pub n: u8,
-    pub ngram: String,
-    pub count: u32,
-}
+/// Read all binary records from a single file into a HashMap, summing counts.
+fn read_shard_file(
+    path: &Path,
+    map: &mut HashMap<NgramKey, u32>,
+    bucket_intern: &mut HashMap<String, Arc<str>>,
+) -> anyhow::Result<()> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut str_buf = Vec::new();
 
-pub fn merge_counts_streaming<F>(data_dir: &Path, mut callback: F) -> anyhow::Result<()>
-where
-    F: FnMut(MergedCount) -> anyhow::Result<()>,
-{
-    let paths = find_files_with_ext(data_dir, "counts")?;
-    if paths.is_empty() {
-        tracing::warn!("No .counts partial files found");
-        return Ok(());
+    loop {
+        let bucket_raw = match read_str(&mut reader, &mut str_buf)? {
+            Some(s) => s,
+            None => break, // EOF
+        };
+        let n = read_u8(&mut reader)?;
+        let ngram = read_str(&mut reader, &mut str_buf)?
+            .ok_or_else(|| anyhow::anyhow!("Unexpected EOF reading ngram"))?;
+        let count = read_u32(&mut reader)?;
+
+        // Intern the bucket string to share Arc allocations
+        let bucket: Arc<str> = bucket_intern
+            .entry(bucket_raw)
+            .or_insert_with_key(|k| Arc::from(k.as_str()))
+            .clone();
+
+        let key = NgramKey { bucket, n, ngram };
+        *map.entry(key).or_insert(0) += count;
     }
 
-    tracing::info!("Streaming merge of {} .counts files", paths.len());
-    let mut merger = KWayMerge::new(&paths)?;
-    let mut merged_count = 0u64;
-
-    while let Some(line) = merger.pop()? {
-        let (key, val) = split_key_value(&line);
-        let mut total: u64 = val.parse().unwrap_or(0);
-
-        while let Some(peek) = merger.peek_line() {
-            let (peek_key, _) = split_key_value(peek);
-            if peek_key != key {
-                break;
-            }
-            let next = merger.pop()?.unwrap();
-            let (_, v) = split_key_value(&next);
-            total += v.parse::<u64>().unwrap_or(0);
-        }
-
-        // Parse key: "bucket\tn\tngram"
-        let parts: Vec<&str> = key.splitn(3, '\t').collect();
-        if parts.len() == 3 {
-            let bucket = parts[0].to_string();
-            let n: u8 = parts[1].parse().unwrap_or(0);
-            let ngram = parts[2].to_string();
-
-            callback(MergedCount {
-                bucket,
-                n,
-                ngram,
-                count: total as u32,
-            })?;
-
-            merged_count += 1;
-        }
-
-        merger.log_progress("Counts");
-    }
-
-    tracing::info!("Counts merge complete — {} entries", merged_count);
     Ok(())
 }
 
-// ============================================================================
-// Totals merge
-// ============================================================================
+/// Merge all sharded partial files in parallel.
+///
+/// Returns one HashMap per shard. Shards are disjoint by key, so no
+/// cross-shard aggregation is needed.
+pub fn merge_shards_parallel(
+    data_dir: &Path,
+    num_shards: usize,
+) -> anyhow::Result<Vec<HashMap<NgramKey, u32>>> {
+    let completed = Arc::new(AtomicUsize::new(0));
 
-pub struct MergedTotal {
-    pub bucket: String,
-    pub n: u8,
-    pub total: u64,
-}
+    let results: Vec<anyhow::Result<HashMap<NgramKey, u32>>> = (0..num_shards)
+        .into_par_iter()
+        .map(|shard| {
+            let files = find_shard_files(data_dir, shard, num_shards)?;
+            let mut map: HashMap<NgramKey, u32> = HashMap::new();
+            let mut bucket_intern: HashMap<String, Arc<str>> = HashMap::new();
 
-pub fn merge_totals_streaming<F>(data_dir: &Path, mut callback: F) -> anyhow::Result<()>
-where
-    F: FnMut(MergedTotal) -> anyhow::Result<()>,
-{
-    let paths = find_files_with_ext(data_dir, "totals")?;
-    if paths.is_empty() {
-        tracing::warn!("No .totals partial files found");
-        return Ok(());
-    }
-
-    tracing::info!("Streaming merge of {} .totals files", paths.len());
-    let mut merger = KWayMerge::new(&paths)?;
-    let mut merged_count = 0u64;
-
-    while let Some(line) = merger.pop()? {
-        let (key, val) = split_key_value(&line);
-        let mut total: u64 = val.parse().unwrap_or(0);
-
-        while let Some(peek) = merger.peek_line() {
-            let (peek_key, _) = split_key_value(peek);
-            if peek_key != key {
-                break;
+            for file in &files {
+                read_shard_file(file, &mut map, &mut bucket_intern)?;
             }
-            let next = merger.pop()?.unwrap();
-            let (_, v) = split_key_value(&next);
-            total += v.parse::<u64>().unwrap_or(0);
-        }
 
-        // Parse key: "bucket\tn"
-        if let Some(tab) = key.find('\t') {
-            let bucket = key[..tab].to_string();
-            let n: u8 = key[tab + 1..].parse().unwrap_or(0);
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::info!("  Merge: {}/{} shards complete", done, num_shards);
 
-            callback(MergedTotal {
-                bucket,
-                n,
-                total,
-            })?;
-            merged_count += 1;
-        }
+            Ok(map)
+        })
+        .collect();
 
-        merger.log_progress("Totals");
-    }
-
-    tracing::info!("Totals merge complete — {} entries", merged_count);
-    Ok(())
+    // Collect results, propagating any errors
+    results.into_iter().collect()
 }

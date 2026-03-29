@@ -4,17 +4,17 @@
 
 [process]
 output = "parquet"
-max_entries = 20000000
-producer_count = 2
+start = "2011-01"
+end = "2011-12"
 
 [process.prune.1]
-min_global = 100
-min_bucket = 20
+min_global = 500
+min_bucket = 100
 
 [process.prune.2]
-min_global = 5000
-min_bucket = 50
+min_global = 20000
+min_bucket = 500
 
 [process.prune.3]
-min_global = 2000
-min_bucket = 30
+min_global = 50000
+min_bucket = 1000

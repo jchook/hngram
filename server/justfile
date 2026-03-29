@@ -3,11 +3,14 @@ set positional-arguments
 ingest *args="download":
   cargo run -p ingestion -- "$@"
 
-ingest-dev *args="":
-  cargo run -p ingestion -- process --output parquet --config ingestion.dev.toml "$@"
+ingest-dev:
+  cargo run -p ingestion -- process --config ingestion.dev.toml "$@"
 
-ingest-test *args="":
-  cargo run -p ingestion -- process --output parquet --config ingestion.test.toml "$@"
+ingest-test:
+  cargo run -p ingestion -- process --config ingestion.test.toml "$@"
+
+import *args="":
+  cargo run -p ingestion -- import "$@"
 
 up:
   watchexec -r -w crates -- cargo run -p api --bin api

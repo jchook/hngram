@@ -49,10 +49,10 @@ enum Command {
         /// Directory with downloaded Parquet files
         #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
-        /// First month to process (YYYY-MM)
-        #[arg(long, default_value = "2006-10")]
-        start: String,
-        /// Last month to process (YYYY-MM, default: current month)
+        /// First month to process (YYYY-MM, overrides config file, default: 2006-10)
+        #[arg(long)]
+        start: Option<String>,
+        /// Last month to process (YYYY-MM, overrides config file, default: current month)
         #[arg(long)]
         end: Option<String>,
         /// Output mode: "clickhouse" or "parquet" (overrides config file)
@@ -64,6 +64,9 @@ enum Command {
         /// Concurrent file processing workers (overrides config file)
         #[arg(long)]
         producer_count: Option<usize>,
+        /// Number of shards for parallel merge (overrides config file)
+        #[arg(long)]
+        merge_shards: Option<usize>,
         /// Path to TOML config file
         #[arg(long)]
         config: Option<PathBuf>,
@@ -132,12 +135,9 @@ async fn main() -> anyhow::Result<()> {
             output,
             max_entries,
             producer_count,
+            merge_shards,
             config,
         } => {
-            let start = YearMonth::parse(&start)?;
-            let end = parse_end(&end)?;
-            let months = month_range(start, end);
-
             // Load TOML config file if provided
             let toml_config = match &config {
                 Some(path) => {
@@ -148,6 +148,15 @@ async fn main() -> anyhow::Result<()> {
                 None => config::IngestionConfig::default(),
             };
             let toml_process = toml_config.process.unwrap_or_default();
+
+            // Resolve date range: CLI > TOML > default
+            let start_str = start
+                .or(toml_process.start)
+                .unwrap_or_else(|| "2006-10".to_string());
+            let start = YearMonth::parse(&start_str)?;
+            let end_str = end.or(toml_process.end);
+            let end = parse_end(&end_str)?;
+            let months = month_range(start, end);
 
             // Resolve: CLI arg > TOML > default
             let defaults = process::ProcessConfig::default();
@@ -187,6 +196,9 @@ async fn main() -> anyhow::Result<()> {
                 producer_count: producer_count
                     .or(toml_process.producer_count)
                     .unwrap_or(defaults.producer_count),
+                merge_shards: merge_shards
+                    .or(toml_process.merge_shards)
+                    .unwrap_or(defaults.merge_shards),
                 prune: toml_process.prune,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)
