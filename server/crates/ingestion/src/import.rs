@@ -1,19 +1,17 @@
 //! Import: load Parquet output files into ClickHouse with atomic table swap (RFC-004 §10).
 //!
-//! Reads the four Parquet files from {data-dir}/output/, loads them into staging
-//! tables, then atomically swaps each data table. The ingestion_log entry is
-//! appended (not swapped) to preserve audit history.
+//! POSTs Parquet files directly to ClickHouse's HTTP API (`FORMAT Parquet`),
+//! bypassing row-by-row deserialization. Loads into staging tables, then
+//! atomically swaps each data table.
 
 use anyhow::{bail, Context};
-use arrow::array::{Array, Int64Array, StringArray, UInt32Array, UInt64Array, UInt8Array};
+use arrow::array::{Array, Int64Array, StringArray, UInt64Array};
 use hn_clickhouse::{
-    BucketTotalRow, GlobalCountRow, HnClickHouse, IngestionLogRow, NgramCountRow,
-    NgramVocabularyRow, TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_NGRAM_COUNTS,
+    HnClickHouse, IngestionLogRow, TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_NGRAM_COUNTS,
     TABLE_NGRAM_VOCABULARY,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::path::Path;
-use time::OffsetDateTime;
 
 /// The data tables that get swapped during import.
 const DATA_TABLES: [&str; 4] = [
@@ -23,23 +21,33 @@ const DATA_TABLES: [&str; 4] = [
     TABLE_GLOBAL_COUNTS,
 ];
 
-/// Run the import: load Parquet output into staging tables, swap, append log.
+/// Parquet file → ClickHouse table mapping.
+const FILE_TABLE_MAP: [(&str, &str); 4] = [
+    ("ngram_counts.parquet", TABLE_NGRAM_COUNTS),
+    ("bucket_totals.parquet", TABLE_BUCKET_TOTALS),
+    ("ngram_vocabulary.parquet", TABLE_NGRAM_VOCABULARY),
+    ("global_counts.parquet", TABLE_GLOBAL_COUNTS),
+];
+
+/// Run the import: POST Parquet files to staging tables, swap, append log.
 pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
     let output_dir = data_dir.join("output");
     let run_start = std::time::Instant::now();
 
     // Validate all output files exist
-    let counts_path = output_dir.join("ngram_counts.parquet");
-    let totals_path = output_dir.join("bucket_totals.parquet");
-    let vocab_path = output_dir.join("ngram_vocabulary.parquet");
-    let gc_path = output_dir.join("global_counts.parquet");
     let log_path = output_dir.join("ingestion_log.parquet");
-
-    for path in [&counts_path, &totals_path, &vocab_path, &gc_path, &log_path] {
+    for (file, _) in &FILE_TABLE_MAP {
+        let path = output_dir.join(file);
         if !path.exists() {
             bail!("Missing output file: {}", path.display());
         }
     }
+    if !log_path.exists() {
+        bail!("Missing output file: {}", log_path.display());
+    }
+
+    // Build reqwest client for direct Parquet POST
+    let http_client = reqwest::Client::new();
 
     // Create staging tables
     tracing::info!("Creating staging tables...");
@@ -47,26 +55,16 @@ pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
         ch.create_staging_table(table).await?;
     }
 
-    // Load data into staging tables (streamed batch by batch from Parquet)
-    tracing::info!("Loading ngram_counts.parquet...");
-    let staging = format!("{}_staging", TABLE_NGRAM_COUNTS);
-    let count = stream_ngram_counts(&counts_path, &staging, ch).await?;
-    tracing::info!("  {} rows loaded", count);
+    // POST each Parquet file directly to its staging table
+    for (file, table) in &FILE_TABLE_MAP {
+        let path = output_dir.join(file);
+        let staging = format!("{}_staging", table);
+        tracing::info!("Loading {} → {}...", file, staging);
 
-    tracing::info!("Loading bucket_totals.parquet...");
-    let staging = format!("{}_staging", TABLE_BUCKET_TOTALS);
-    let count = stream_bucket_totals(&totals_path, &staging, ch).await?;
-    tracing::info!("  {} rows loaded", count);
-
-    tracing::info!("Loading ngram_vocabulary.parquet...");
-    let staging = format!("{}_staging", TABLE_NGRAM_VOCABULARY);
-    let count = stream_vocabulary(&vocab_path, &staging, ch).await?;
-    tracing::info!("  {} rows loaded", count);
-
-    tracing::info!("Loading global_counts.parquet...");
-    let staging = format!("{}_staging", TABLE_GLOBAL_COUNTS);
-    let count = stream_global_counts(&gc_path, &staging, ch).await?;
-    tracing::info!("  {} rows loaded", count);
+        let start = std::time::Instant::now();
+        post_parquet_file(&http_client, ch, &staging, &path).await?;
+        tracing::info!("  Loaded in {:.1}s", start.elapsed().as_secs_f64());
+    }
 
     // Atomic swap for each data table
     tracing::info!("Swapping tables...");
@@ -95,143 +93,108 @@ pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
 }
 
 // ============================================================================
-// Streaming Parquet → ClickHouse loaders (batch by batch, bounded memory)
+// Direct Parquet POST to ClickHouse HTTP API
 // ============================================================================
 
-async fn stream_ngram_counts(
-    path: &Path,
-    table: &str,
+/// Batch size for chunked Parquet import (rows per POST).
+const IMPORT_BATCH_SIZE: usize = 100_000;
+
+/// Stream a Parquet file to ClickHouse in chunks.
+///
+/// Reads the file in batches with Arrow, re-encodes each batch as a small
+/// in-memory Parquet buffer, and POSTs it. This bounds ClickHouse memory
+/// regardless of total file size.
+async fn post_parquet_file(
+    http_client: &reqwest::Client,
     ch: &HnClickHouse,
-) -> anyhow::Result<u64> {
+    table: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    use parquet::arrow::ArrowWriter;
+
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    let mut total = 0u64;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("Failed to read Parquet metadata from {}", path.display()))?;
+    let schema = builder.schema().clone();
+    let file_meta = builder.metadata().file_metadata();
+    let expected_rows = file_meta.num_rows() as u64;
+    let reader = builder.with_batch_size(IMPORT_BATCH_SIZE).build()?;
+
+    let query = format!("INSERT INTO {} FORMAT Parquet", table);
+    let mut total_rows = 0u64;
+    let mut last_pct = 0u8;
 
     for batch_result in reader {
         let batch = batch_result?;
-        let tv_col = batch.column_by_name("tokenizer_version").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing tokenizer_version")?;
-        let n_col = batch.column_by_name("n").and_then(|c| c.as_any().downcast_ref::<UInt8Array>()).context("Missing n")?;
-        let ngram_col = batch.column_by_name("ngram").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing ngram")?;
-        let bucket_col = batch.column_by_name("bucket").and_then(|c| c.as_any().downcast_ref::<arrow::array::Date32Array>()).context("Missing bucket")?;
-        let count_col = batch.column_by_name("count").and_then(|c| c.as_any().downcast_ref::<UInt32Array>()).context("Missing count")?;
+        let num_rows = batch.num_rows();
 
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for i in 0..batch.num_rows() {
-            rows.push(NgramCountRow {
-                tokenizer_version: tv_col.value(i).to_string(),
-                n: n_col.value(i),
-                ngram: ngram_col.value(i).to_string(),
-                bucket: days_to_date(bucket_col.value(i))?,
-                count: count_col.value(i),
-            });
+        // Re-encode batch as a small Parquet buffer
+        let mut buf: Vec<u8> = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, schema.clone(), None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        // POST the chunk
+        post_parquet_bytes(http_client, ch, table, &query, buf).await?;
+        total_rows += num_rows as u64;
+
+        if expected_rows > 0 {
+            let pct = (total_rows * 100 / expected_rows).min(100) as u8;
+            let bucket = pct / 10 * 10;
+            if bucket > last_pct && bucket < 100 {
+                last_pct = bucket;
+                tracing::info!("  {}%  ({} / {} rows)", bucket, total_rows, expected_rows);
+            }
         }
-        ch.insert_ngram_counts_to(table, &rows).await?;
-        total += rows.len() as u64;
     }
-    Ok(total)
+
+    tracing::info!("  {} total rows", total_rows);
+    Ok(())
 }
 
-async fn stream_bucket_totals(
-    path: &Path,
-    table: &str,
+/// POST a Parquet byte buffer to ClickHouse.
+async fn post_parquet_bytes(
+    http_client: &reqwest::Client,
     ch: &HnClickHouse,
-) -> anyhow::Result<u64> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    let mut total = 0u64;
-
-    for batch_result in reader {
-        let batch = batch_result?;
-        let tv_col = batch.column_by_name("tokenizer_version").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing tokenizer_version")?;
-        let n_col = batch.column_by_name("n").and_then(|c| c.as_any().downcast_ref::<UInt8Array>()).context("Missing n")?;
-        let bucket_col = batch.column_by_name("bucket").and_then(|c| c.as_any().downcast_ref::<arrow::array::Date32Array>()).context("Missing bucket")?;
-        let total_col = batch.column_by_name("total_count").and_then(|c| c.as_any().downcast_ref::<UInt64Array>()).context("Missing total_count")?;
-
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for i in 0..batch.num_rows() {
-            rows.push(BucketTotalRow {
-                tokenizer_version: tv_col.value(i).to_string(),
-                n: n_col.value(i),
-                bucket: days_to_date(bucket_col.value(i))?,
-                total_count: total_col.value(i),
-            });
-        }
-        ch.insert_bucket_totals_to(table, &rows).await?;
-        total += rows.len() as u64;
-    }
-    Ok(total)
-}
-
-async fn stream_vocabulary(
-    path: &Path,
     table: &str,
-    ch: &HnClickHouse,
-) -> anyhow::Result<u64> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    let mut total = 0u64;
+    query: &str,
+    body: Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut req = http_client
+        .post(ch.http_url())
+        .query(&[("query", query), ("database", ch.database())])
+        .header("Content-Type", "application/octet-stream")
+        .body(body);
 
-    for batch_result in reader {
-        let batch = batch_result?;
-        let tv_col = batch.column_by_name("tokenizer_version").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing tokenizer_version")?;
-        let n_col = batch.column_by_name("n").and_then(|c| c.as_any().downcast_ref::<UInt8Array>()).context("Missing n")?;
-        let ngram_col = batch.column_by_name("ngram").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing ngram")?;
-        let gc_col = batch.column_by_name("global_count").and_then(|c| c.as_any().downcast_ref::<UInt64Array>()).context("Missing global_count")?;
-        let admitted_col = batch.column_by_name("admitted_at").and_then(|c| c.as_any().downcast_ref::<arrow::array::TimestampMillisecondArray>()).context("Missing admitted_at")?;
-
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for i in 0..batch.num_rows() {
-            let ms = admitted_col.value(i);
-            let admitted_at = OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000)
-                .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-            rows.push(NgramVocabularyRow {
-                tokenizer_version: tv_col.value(i).to_string(),
-                n: n_col.value(i),
-                ngram: ngram_col.value(i).to_string(),
-                global_count: gc_col.value(i),
-                admitted_at,
-            });
-        }
-        ch.insert_vocabulary_to(table, &rows).await?;
-        total += rows.len() as u64;
+    let user = ch.http_user();
+    let password = ch.http_password();
+    if !user.is_empty() {
+        req = req.header("X-ClickHouse-User", user);
     }
-    Ok(total)
+    if !password.is_empty() {
+        req = req.header("X-ClickHouse-Key", password);
+    }
+
+    let resp = req.send().await.context("Failed to POST Parquet to ClickHouse")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "ClickHouse rejected Parquet upload to {}: {} — {}",
+            table,
+            status,
+            body.trim()
+        );
+    }
+
+    Ok(())
 }
 
-async fn stream_global_counts(
-    path: &Path,
-    table: &str,
-    ch: &HnClickHouse,
-) -> anyhow::Result<u64> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    let mut total = 0u64;
-
-    for batch_result in reader {
-        let batch = batch_result?;
-        let tv_col = batch.column_by_name("tokenizer_version").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing tokenizer_version")?;
-        let n_col = batch.column_by_name("n").and_then(|c| c.as_any().downcast_ref::<UInt8Array>()).context("Missing n")?;
-        let ngram_col = batch.column_by_name("ngram").and_then(|c| c.as_any().downcast_ref::<StringArray>()).context("Missing ngram")?;
-        let count_col = batch.column_by_name("count").and_then(|c| c.as_any().downcast_ref::<UInt64Array>()).context("Missing count")?;
-
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for i in 0..batch.num_rows() {
-            rows.push(GlobalCountRow {
-                tokenizer_version: tv_col.value(i).to_string(),
-                n: n_col.value(i),
-                ngram: ngram_col.value(i).to_string(),
-                count: count_col.value(i),
-            });
-        }
-        ch.insert_global_counts_to(table, &rows).await?;
-        total += rows.len() as u64;
-    }
-    Ok(total)
-}
+// ============================================================================
+// Ingestion log reader (small file, still uses Arrow)
+// ============================================================================
 
 fn read_ingestion_log(path: &Path) -> anyhow::Result<IngestionLogRow> {
     let file = std::fs::File::open(path)
@@ -300,17 +263,4 @@ fn read_ingestion_log(path: &Path) -> anyhow::Result<IngestionLogRow> {
     }
 
     bail!("ingestion_log.parquet is empty")
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Convert Date32 (days since 1970-01-01) to time::Date.
-fn days_to_date(days: i32) -> anyhow::Result<time::Date> {
-    let epoch = time::Date::from_ordinal_date(1970, 1).unwrap();
-    let date = epoch
-        .checked_add(time::Duration::days(days as i64))
-        .context("Invalid Date32 value")?;
-    Ok(date)
 }

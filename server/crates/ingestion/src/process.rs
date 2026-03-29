@@ -501,13 +501,15 @@ async fn process_parquet(
     tracing::info!("Deriving globals and building vocabulary...");
 
     let mut globals: HashMap<(u8, String), u64> = HashMap::new();
-    for shard_map in &shard_maps {
+    for (i, shard_map) in shard_maps.iter().enumerate() {
         for (key, &count) in shard_map {
             *globals.entry((key.n, key.ngram.clone())).or_insert(0) += count as u64;
         }
+        tracing::info!("  Deriving globals: {}/{} shards", i + 1, num_shards);
     }
 
     let vocabulary = build_vocabulary(&globals, &config);
+    tracing::info!("Vocabulary built — {} admitted entries", vocabulary.len());
 
     let gc_path = output_dir.join("global_counts.parquet");
     let mut gc_writer = parquet_writer::GlobalCountsWriter::new(&gc_path)?;
@@ -515,6 +517,8 @@ async fn process_parquet(
     let mut total_unigrams = 0u64;
     let mut total_bigrams = 0u64;
     let mut total_trigrams = 0u64;
+    let globals_total = globals.len() as u64;
+    let mut last_pct = 0u8;
 
     let mut vocab_counts: HashMap<(u8, String), u64> = HashMap::new();
     for ((n, ngram), &count) in &globals {
@@ -533,6 +537,14 @@ async fn process_parquet(
         }
         if vocabulary.contains_key(&(*n, ngram.clone())) {
             vocab_counts.insert((*n, ngram.clone()), count);
+        }
+        if globals_total > 0 {
+            let pct = (total_gc_rows * 100 / globals_total).min(100) as u8;
+            let bucket = pct / 10 * 10;
+            if bucket > last_pct && bucket < 100 {
+                last_pct = bucket;
+                tracing::info!("  Writing global_counts.parquet: {}%", bucket);
+            }
         }
     }
     gc_writer.finish()?;
@@ -563,7 +575,7 @@ async fn process_parquet(
 
     let mut totals: HashMap<BucketKey, u64> = HashMap::new();
 
-    for shard_map in &shard_maps {
+    for (i, shard_map) in shard_maps.iter().enumerate() {
         for (key, &count) in shard_map {
             // Accumulate unpruned totals (denominators must remain unpruned)
             let total_key = BucketKey {
@@ -592,6 +604,7 @@ async fn process_parquet(
                 total_count_rows += 1;
             }
         }
+        tracing::info!("  Filtering counts: {}/{} shards", i + 1, num_shards);
     }
 
     counts_writer.finish()?;
@@ -690,6 +703,9 @@ mod parquet_writer {
     fn writer_props() -> WriterProperties {
         WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
+            // Limit row group size so ClickHouse can import without loading
+            // the entire file into memory at once.
+            .set_max_row_group_size(500_000)
             .build()
     }
 

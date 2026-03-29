@@ -166,6 +166,11 @@ struct VocabularyCheckRow {
 pub struct HnClickHouse {
     client: Client,
     tokenizer_version: String,
+    /// HTTP base URL (e.g. "http://localhost:8123") for raw HTTP operations.
+    http_url: String,
+    http_user: String,
+    http_password: String,
+    http_database: String,
 }
 
 impl HnClickHouse {
@@ -205,14 +210,18 @@ impl HnClickHouse {
         let url = format!("http://{}:{}", host, port);
 
         let client = Client::default()
-            .with_url(url)
-            .with_user(user)
-            .with_password(password)
-            .with_database(database);
+            .with_url(&url)
+            .with_user(&user)
+            .with_password(&password)
+            .with_database(&database);
 
         Self {
             client,
             tokenizer_version: TOKENIZER_VERSION.to_string(),
+            http_url: url,
+            http_user: user,
+            http_password: password,
+            http_database: database,
         }
     }
 
@@ -227,7 +236,31 @@ impl HnClickHouse {
         Self {
             client,
             tokenizer_version: TOKENIZER_VERSION.to_string(),
+            http_url: url.to_string(),
+            http_user: user.to_string(),
+            http_password: password.to_string(),
+            http_database: database.to_string(),
         }
+    }
+
+    /// HTTP base URL for raw HTTP operations (e.g. Parquet upload).
+    pub fn http_url(&self) -> &str {
+        &self.http_url
+    }
+
+    /// HTTP auth user.
+    pub fn http_user(&self) -> &str {
+        &self.http_user
+    }
+
+    /// HTTP auth password.
+    pub fn http_password(&self) -> &str {
+        &self.http_password
+    }
+
+    /// Database name.
+    pub fn database(&self) -> &str {
+        &self.http_database
     }
 
     /// Get the tokenizer version string
