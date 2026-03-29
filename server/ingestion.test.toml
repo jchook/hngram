@@ -1,16 +1,20 @@
-# Extreme pruning for quick smoke tests.
-# Only keeps the most common n-grams — tiny dataset, fast iterations.
+# Extreme pruning for smoke tests — very small dataset, fast iteration.
 #
-# Usage: cargo run -p ingestion -- process --output parquet --config ingestion.test.toml
+# Usage: just ingest-test
 
-[pruning.1]
+[process]
+output = "parquet"
+max_entries = 20000000
+producer_count = 2
+
+[process.prune.1]
 min_global = 100
 min_bucket = 20
 
-[pruning.2]
+[process.prune.2]
 min_global = 5000
 min_bucket = 50
 
-[pruning.3]
+[process.prune.3]
 min_global = 2000
 min_bucket = 30

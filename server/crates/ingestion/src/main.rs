@@ -5,6 +5,7 @@
 //!   process  — tokenize, count, prune → ClickHouse (default) or Parquet files
 //!   import   — load Parquet output into ClickHouse with atomic table swap
 
+mod config;
 mod download;
 mod import;
 mod months;
@@ -54,16 +55,16 @@ enum Command {
         /// Last month to process (YYYY-MM, default: current month)
         #[arg(long)]
         end: Option<String>,
-        /// Output mode: "clickhouse" (default) or "parquet"
-        #[arg(long, default_value = "clickhouse")]
-        output: OutputArg,
-        /// Flush threshold: combined globals + counts entries (parquet mode)
-        #[arg(long, default_value = "20000000")]
-        max_entries: usize,
-        /// Concurrent file processing workers
-        #[arg(long, default_value = "2")]
-        producer_count: usize,
-        /// Path to TOML config file for pruning thresholds
+        /// Output mode: "clickhouse" or "parquet" (overrides config file)
+        #[arg(long)]
+        output: Option<OutputArg>,
+        /// Flush threshold: combined globals + counts entries (overrides config file)
+        #[arg(long)]
+        max_entries: Option<usize>,
+        /// Concurrent file processing workers (overrides config file)
+        #[arg(long)]
+        producer_count: Option<usize>,
+        /// Path to TOML config file
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -137,9 +138,28 @@ async fn main() -> anyhow::Result<()> {
             let end = parse_end(&end)?;
             let months = month_range(start, end);
 
+            // Load TOML config file if provided
+            let toml_config = match &config {
+                Some(path) => {
+                    let cfg = config::load(path)?;
+                    tracing::info!("Loaded config from {}", path.display());
+                    cfg
+                }
+                None => config::IngestionConfig::default(),
+            };
+            let toml_process = toml_config.process.unwrap_or_default();
+
+            // Resolve: CLI arg > TOML > default
+            let defaults = process::ProcessConfig::default();
+
             let mode = match output {
-                OutputArg::Clickhouse => OutputMode::ClickHouse,
-                OutputArg::Parquet => OutputMode::Parquet,
+                Some(OutputArg::Clickhouse) => OutputMode::ClickHouse,
+                Some(OutputArg::Parquet) => OutputMode::Parquet,
+                None => match toml_process.output.as_deref() {
+                    Some("parquet") => OutputMode::Parquet,
+                    Some("clickhouse") | None => OutputMode::ClickHouse,
+                    Some(other) => anyhow::bail!("Unknown output mode '{}' in config file", other),
+                },
             };
 
             let ch = if mode == OutputMode::ClickHouse {
@@ -161,9 +181,13 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let proc_config = process::ProcessConfig {
-                max_entries,
-                producer_count,
-                config_path: config,
+                max_entries: max_entries
+                    .or(toml_process.max_entries)
+                    .unwrap_or(defaults.max_entries),
+                producer_count: producer_count
+                    .or(toml_process.producer_count)
+                    .unwrap_or(defaults.producer_count),
+                prune: toml_process.prune,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)
                 .await?;

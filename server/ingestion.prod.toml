@@ -1,15 +1,18 @@
-# Production pruning thresholds (matches hardcoded defaults).
+# Production defaults.
 #
-# Usage: cargo run -p ingestion -- process --output parquet --config ingestion.prod.toml
+# Usage: cargo run -p ingestion -- process --config ingestion.prod.toml
 
-[pruning.1]
+[process]
+output = "clickhouse"
+
+[process.prune.1]
 min_global = 0
 min_bucket = 1
 
-[pruning.2]
+[process.prune.2]
 min_global = 20
 min_bucket = 3
 
-[pruning.3]
+[process.prune.3]
 min_global = 10
 min_bucket = 5
