@@ -18,11 +18,6 @@ pub struct Comment {
     pub ts_ms: i64,
 }
 
-/// Read a Parquet file and return all filtered comments.
-pub fn read_comments(path: &Path) -> anyhow::Result<Vec<Comment>> {
-    read_comments_after(path, 0)
-}
-
 /// Read a Parquet file and return filtered comments with `time > min_ts`.
 ///
 /// Filters: type=2 (comment), deleted=0, dead=0, text not null, time > min_ts.
@@ -61,19 +56,19 @@ fn millis_to_date_string(ms: i64) -> Option<String> {
     ))
 }
 
-/// Stream global counts from a Parquet file, one batch at a time.
-/// Calls `on_batch` with each batch's global counts HashMap.
+/// Stream NgramCounter data from a Parquet file, one batch at a time.
+/// Calls `on_batch` with each batch's NgramCounter (per-bucket counts + totals).
 /// Memory per batch: one NgramCounter for ~8192 rows (a few MB).
-pub fn stream_global_counts<F>(path: &Path, min_ts: i64, mut on_batch: F) -> anyhow::Result<()>
+pub fn stream_counters<F>(path: &Path, min_ts: i64, mut on_batch: F) -> anyhow::Result<()>
 where
-    F: FnMut(std::collections::HashMap<(u8, String), u64>) -> anyhow::Result<()>,
+    F: FnMut(NgramCounter) -> anyhow::Result<()>,
 {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("Failed to read Parquet metadata from {}", path.display()))?
-        .with_batch_size(8192);
+        .with_batch_size(65536);
 
     let reader = builder.build()?;
 
@@ -85,10 +80,7 @@ where
         }
 
         let counter = process_comments_parallel(&comments);
-        let globals = counter.global_counts();
-        if !globals.is_empty() {
-            on_batch(globals)?;
-        }
+        on_batch(counter)?;
     }
 
     Ok(())

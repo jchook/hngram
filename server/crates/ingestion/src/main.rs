@@ -57,9 +57,9 @@ enum Command {
         /// Output mode: "clickhouse" (default) or "parquet"
         #[arg(long, default_value = "clickhouse")]
         output: OutputArg,
-        /// Flush threshold for accumulator cardinality in pass 1 (parquet mode)
-        #[arg(long, default_value = "10000000")]
-        max_ngrams: usize,
+        /// Flush threshold: combined globals + counts entries (parquet mode)
+        #[arg(long, default_value = "20000000")]
+        max_entries: usize,
         /// Concurrent file processing workers
         #[arg(long, default_value = "2")]
         producer_count: usize,
@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
             start,
             end,
             output,
-            max_ngrams,
+            max_entries,
             producer_count,
         } => {
             let start = YearMonth::parse(&start)?;
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let proc_config = process::ProcessConfig {
-                max_ngrams,
+                max_entries,
                 producer_count,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)

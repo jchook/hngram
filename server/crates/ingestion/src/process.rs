@@ -13,7 +13,7 @@ use hn_clickhouse::{
     NgramVocabularyRow,
 };
 use std::path::Path;
-use tokenizer::counter::{build_vocabulary, PruningConfig};
+use tokenizer::counter::{build_vocabulary, BucketKey, NgramKey, PruningConfig};
 use tokenizer::TOKENIZER_VERSION;
 
 /// Output mode for the process command.
@@ -25,9 +25,9 @@ pub enum OutputMode {
 
 /// Configuration for the process command.
 pub struct ProcessConfig {
-    /// Flush threshold for accumulator cardinality in pass 1.
-    /// This is a threshold, not a hard cap — the accumulator retains capacity after flush.
-    pub max_ngrams: usize,
+    /// Flush threshold: flush when globals.len() + counts.len() exceeds this.
+    /// This is a threshold, not a hard cap — accumulators retain capacity after flush.
+    pub max_entries: usize,
     /// Number of concurrent file-processing workers.
     pub producer_count: usize,
 }
@@ -35,7 +35,7 @@ pub struct ProcessConfig {
 impl Default for ProcessConfig {
     fn default() -> Self {
         Self {
-            max_ngrams: 10_000_000,
+            max_entries: 20_000_000,
             producer_count: 2,
         }
     }
@@ -311,41 +311,49 @@ async fn process_parquet(
     std::fs::create_dir_all(&output_dir)?;
 
     // ================================================================
-    // Pass 1: Build vocabulary from global counts
-    // Producers stream row-group-level counts through a bounded channel.
-    // Consumer accumulates and flushes to sorted partial files at threshold.
+    // Single pass: read source data once, emit three partial streams
+    // Producers stream NgramCounter batches through a bounded channel.
+    // Consumer accumulates globals + counts + totals, flushes all three
+    // together when combined cardinality exceeds threshold.
     // ================================================================
 
-    if vocabulary::is_pass1_complete(data_dir) {
-        tracing::info!("Pass 1: already complete (found .complete marker), skipping to merge");
+    if vocabulary::is_pass_complete(data_dir) {
+        tracing::info!("Source processing already complete (.complete marker found), skipping to merge");
     } else {
         tracing::info!(
-            "Pass 1: Building vocabulary from {} files (max_ngrams={}, producers={})",
+            "Processing {} source files (max_entries={}, producers={})",
             total,
-            proc_config.max_ngrams,
+            proc_config.max_entries,
             proc_config.producer_count,
         );
 
-        // Clean partial directory for fresh run
-        let partial_dir = vocabulary::partial_dir(data_dir);
-        if partial_dir.exists() {
-            std::fs::remove_dir_all(&partial_dir)?;
-        }
-        std::fs::create_dir_all(&partial_dir)?;
+        // Ensure partial directory exists (keep existing partials for resume)
+        let p_dir = vocabulary::partial_dir(data_dir);
+        std::fs::create_dir_all(&p_dir)?;
 
-        // Bounded channel: capacity 1 for tight backpressure
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<std::collections::HashMap<(u8, String), u64>>(1);
+        // Load set of already-processed source files for resume
+        let done_files = vocabulary::load_done_files(data_dir);
+
+        // Bounded channel: capacity 1 for tight backpressure.
+        use tokenizer::counter::NgramCounter;
+        enum Msg {
+            Batch(NgramCounter),
+            FileDone(String), // rel_path of completed source file
+        }
+        // Channel capacity = producer_count so producers can stay busy while consumer merges
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Msg>(proc_config.producer_count * 2);
 
         // Spawn producers (bounded by semaphore)
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(proc_config.producer_count));
 
-        // Collect source file paths
         let source_files: Vec<(usize, String, std::path::PathBuf)> = months
             .iter()
             .enumerate()
             .filter_map(|(i, ym)| {
                 let rel_path = ym.file_path();
+                if done_files.contains(&rel_path) {
+                    return None; // Already processed in a previous run
+                }
                 let local_path = data_dir.join(&rel_path);
                 if local_path.exists() {
                     Some((i, rel_path, local_path))
@@ -355,6 +363,11 @@ async fn process_parquet(
             })
             .collect();
 
+        if !done_files.is_empty() {
+            tracing::info!("Resuming — {} files already processed, {} remaining",
+                done_files.len(), source_files.len());
+        }
+
         let file_count = source_files.len();
 
         for (i, rel_path, local_path) in source_files {
@@ -363,86 +376,121 @@ async fn process_parquet(
 
             tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                tracing::info!("Pass 1: {} ({}/{})", rel_path, i + 1, total);
+                tracing::info!("Processing: {} ({}/{})", rel_path, i + 1, total);
 
                 let path = local_path;
-                // Stream row-group-level global counts through channel.
-                // tx is moved into the blocking closure — each producer owns its clone.
+                let rel = rel_path.clone();
+                let tx2 = tx.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    parquet::stream_global_counts(&path, 0, |batch_globals| {
-                        tx.blocking_send(batch_globals)
+                    parquet::stream_counters(&path, 0, |counter| {
+                        tx.blocking_send(Msg::Batch(counter))
                             .map_err(|_| anyhow::anyhow!("Consumer dropped"))
                     })
                 })
                 .await;
 
-                if let Err(e) = result {
-                    tracing::error!("Producer failed for {}: {}", rel_path, e);
-                } else if let Ok(Err(e)) = result {
-                    tracing::error!("Producer failed for {}: {}", rel_path, e);
+                match result {
+                    Ok(Ok(())) => {
+                        let _ = tx2.send(Msg::FileDone(rel)).await;
+                    }
+                    Ok(Err(e)) => tracing::error!("Producer failed for {}: {}", rel_path, e),
+                    Err(e) => tracing::error!("Producer failed for {}: {}", rel_path, e),
                 }
             });
         }
-        drop(tx); // Close sender so consumer knows when all producers are done
+        drop(tx);
 
-        // Consumer: accumulate global counts and flush at cardinality threshold
-        let mut accumulator: std::collections::HashMap<(u8, String), u64> =
+        // Consumer: three accumulators, flush together at threshold.
+        // Also tracks which source files have been durably flushed for resume.
+        let mut globals: std::collections::HashMap<(u8, String), u64> =
             std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<NgramKey, u32> =
+            std::collections::HashMap::new();
+        let mut totals: std::collections::HashMap<BucketKey, u64> =
+            std::collections::HashMap::new();
+
         let mut partial_counter = vocabulary::next_partial_counter(data_dir);
         let mut flush_count = 0u32;
 
-        while let Some(batch_globals) = rx.recv().await {
-            // Merge batch into accumulator, checking threshold during merge
-            for ((n, ngram), count) in batch_globals {
-                *accumulator.entry((n, ngram)).or_insert(0) += count;
+        // Files completed since last flush (will be added to done set on flush)
+        let mut pending_done: Vec<String> = Vec::new();
 
-                // Check flush threshold during merge to limit overshoot
-                if accumulator.len() >= proc_config.max_ngrams {
-                    let path = vocabulary::numbered_partial_path(data_dir, partial_counter);
-                    vocabulary::write_partial_counts(&path, &accumulator)?;
-                    tracing::info!(
-                        "  Flushed partial {} ({} entries)",
-                        partial_counter,
-                        accumulator.len()
-                    );
-                    accumulator.clear(); // Retains capacity for hot reuse
-                    partial_counter += 1;
-                    flush_count += 1;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                Msg::Batch(batch_counter) => {
+                    let batch_globals = batch_counter.global_counts();
+                    for ((n, ngram), count) in batch_globals {
+                        *globals.entry((n, ngram)).or_insert(0) += count;
+                    }
+                    for (key, &count) in batch_counter.counts() {
+                        *counts.entry(key.clone()).or_insert(0) += count;
+                    }
+                    for (key, &total) in batch_counter.totals() {
+                        *totals.entry(key.clone()).or_insert(0) += total;
+                    }
+
+                    // Check flush threshold: globals.len() + counts.len()
+                    if globals.len() + counts.len() >= proc_config.max_entries {
+                        let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
+                        let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
+                        let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
+                        vocabulary::write_globals(&g_path, &globals)?;
+                        vocabulary::write_counts(&c_path, &counts)?;
+                        vocabulary::write_totals(&t_path, &totals)?;
+                        // Mark pending files as durably flushed
+                        vocabulary::append_done_files(data_dir, &pending_done)?;
+                        tracing::info!(
+                            "  Flushed partial {} (globals: {}, counts: {}, totals: {}, files done: +{})",
+                            partial_counter, globals.len(), counts.len(), totals.len(), pending_done.len()
+                        );
+                        globals.clear();
+                        counts.clear();
+                        totals.clear();
+                        pending_done.clear();
+                        partial_counter += 1;
+                        flush_count += 1;
+                    }
+                }
+                Msg::FileDone(rel_path) => {
+                    pending_done.push(rel_path);
                 }
             }
         }
 
-        // Flush remaining accumulator
-        if !accumulator.is_empty() {
-            let path = vocabulary::numbered_partial_path(data_dir, partial_counter);
-            vocabulary::write_partial_counts(&path, &accumulator)?;
+        // Flush remaining
+        if !globals.is_empty() || !counts.is_empty() {
+            let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
+            let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
+            let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
+            vocabulary::write_globals(&g_path, &globals)?;
+            vocabulary::write_counts(&c_path, &counts)?;
+            vocabulary::write_totals(&t_path, &totals)?;
+            vocabulary::append_done_files(data_dir, &pending_done)?;
             tracing::info!(
-                "  Flushed final partial {} ({} entries)",
-                partial_counter,
-                accumulator.len()
+                "  Flushed final partial {} (globals: {}, counts: {}, totals: {})",
+                partial_counter, globals.len(), counts.len(), totals.len()
             );
             flush_count += 1;
         }
 
-        vocabulary::mark_pass1_complete(data_dir)?;
+        vocabulary::mark_pass_complete(data_dir)?;
         tracing::info!(
-            "Pass 1 complete — {} files processed, {} partial files written",
+            "Source processing complete — {} files, {} partial flushes",
             file_count,
             flush_count,
         );
     }
 
-    // Merge partials, build vocabulary, and write global_counts.parquet
-    // in a single streaming pass. Memory = O(admitted vocabulary), not O(all n-grams).
-    tracing::info!("Streaming merge + vocabulary build + global_counts.parquet...");
+    // ================================================================
+    // Merge 1: globals → vocabulary + global_counts.parquet
+    // ================================================================
+    tracing::info!("Merge 1: globals → vocabulary + global_counts.parquet");
 
     let gc_path = output_dir.join("global_counts.parquet");
     let mut gc_writer = parquet_writer::GlobalCountsWriter::new(&gc_path)?;
 
-    // Vocabulary: only admitted entries (much smaller than all n-grams)
     let mut vocabulary: std::collections::HashMap<(u8, String), ()> =
         std::collections::HashMap::new();
-    // Track admitted entries with their global_count for vocabulary parquet
     let mut vocab_counts: std::collections::HashMap<(u8, String), u64> =
         std::collections::HashMap::new();
 
@@ -451,8 +499,7 @@ async fn process_parquet(
     let mut total_trigrams = 0u64;
     let mut total_gc_rows = 0u64;
 
-    vocabulary::merge_partial_counts_streaming(data_dir, |entry| {
-        // Write every entry to global_counts.parquet
+    vocabulary::merge_globals_streaming(data_dir, |entry| {
         gc_writer.write_one(&GlobalCountRow {
             tokenizer_version: tv.clone(),
             n: entry.n,
@@ -461,7 +508,6 @@ async fn process_parquet(
         })?;
         total_gc_rows += 1;
 
-        // Track counts by n
         match entry.n {
             1 => total_unigrams += 1,
             2 => total_bigrams += 1,
@@ -469,7 +515,6 @@ async fn process_parquet(
             _ => {}
         }
 
-        // Check admission threshold
         let min_global = config.min_global_count(entry.n);
         if entry.count >= min_global {
             vocabulary.insert((entry.n, entry.ngram.clone()), ());
@@ -486,147 +531,87 @@ async fn process_parquet(
 
     tracing::info!(
         "Global counts: {} unigrams, {} bigram candidates, {} trigram candidates",
-        total_unigrams,
-        total_bigrams,
-        total_trigrams,
+        total_unigrams, total_bigrams, total_trigrams,
     );
     tracing::info!(
         "Admitted: {} bigrams (of {}), {} trigrams (of {})",
-        admitted_bigrams,
-        total_bigrams,
-        admitted_trigrams,
-        total_trigrams,
+        admitted_bigrams, total_bigrams, admitted_trigrams, total_trigrams,
     );
     tracing::info!("Wrote {} global count rows to parquet", total_gc_rows);
 
     // ================================================================
-    // Pass 2: Filter and write output Parquet files
-    // Producers (concurrent): read, tokenize, filter
-    // Consumer (single): write to Parquet
+    // Merge 2: counts → filter by vocabulary → ngram_counts.parquet
     // ================================================================
-    tracing::info!("Pass 2: Writing output Parquet files");
+    tracing::info!("Merge 2: counts → ngram_counts.parquet (filtered by vocabulary)");
 
     let counts_path = output_dir.join("ngram_counts.parquet");
-    let totals_path = output_dir.join("bucket_totals.parquet");
-
     let mut counts_writer = parquet_writer::NgramCountsWriter::new(&counts_path)?;
-    let mut totals_writer = parquet_writer::BucketTotalsWriter::new(&totals_path)?;
-
-    let mut max_ts: i64 = 0;
-    let mut total_comments = 0u64;
     let mut total_count_rows = 0u64;
-    let mut total_total_rows = 0u64;
+    let mut max_ts: i64 = 0;
 
-    // Channel for processed results
-    struct Pass2Result {
-        count_rows: Vec<NgramCountRow>,
-        total_rows: Vec<BucketTotalRow>,
-        comment_count: u64,
-        max_ts: i64,
-        rel_path: String,
-        elapsed_secs: f64,
-    }
+    vocabulary::merge_counts_streaming(data_dir, |entry| {
+        // Filter: unigrams always admitted, bigrams/trigrams need vocabulary check
+        let dominated = if entry.n == 1 {
+            entry.count >= config.min_bucket_count(1)
+        } else {
+            vocabulary.contains_key(&(entry.n, entry.ngram.clone()))
+                && entry.count >= config.min_bucket_count(entry.n)
+        };
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Pass2Result>(proc_config.producer_count);
-
-    // Spawn producers
-    let producer_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(proc_config.producer_count));
-    for ym in months.iter() {
-        let rel_path = ym.file_path();
-        let local_path = data_dir.join(&rel_path);
-        if !local_path.exists() {
-            continue;
+        if dominated {
+            let bucket = parse_bucket_date(&entry.bucket)?;
+            counts_writer.write_batch(&[NgramCountRow {
+                tokenizer_version: tv.clone(),
+                n: entry.n,
+                ngram: entry.ngram,
+                bucket,
+                count: entry.count,
+            }])?;
+            total_count_rows += 1;
         }
 
-        let tx = tx.clone();
-        let sem = producer_sem.clone();
-        let vocab = vocabulary.clone();
-        let cfg = config.clone();
-        let tv = tv.clone();
-
-        tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let file_start = std::time::Instant::now();
-
-            let path = local_path.clone();
-            let comments = match tokio::task::spawn_blocking(move || parquet::read_comments(&path)).await {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => { tracing::error!("Failed to read {}: {}", rel_path, e); return; }
-                Err(e) => { tracing::error!("Task failed for {}: {}", rel_path, e); return; }
-            };
-
-            let comment_count = comments.len() as u64;
-            let file_max_ts = comments.iter().map(|c| c.ts_ms).max().unwrap_or(0);
-
-            let counter = match tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments)).await {
-                Ok(c) => c,
-                Err(e) => { tracing::error!("Tokenization failed for {}: {}", rel_path, e); return; }
-            };
-
-            let filtered_counts = counter.filter_to_vocabulary(&vocab, &cfg);
-            let totals = counter.totals();
-
-            let mut count_rows = Vec::with_capacity(filtered_counts.len());
-            for (key, count) in &filtered_counts {
-                if let Ok(bucket) = parse_bucket_date(&key.bucket) {
-                    count_rows.push(NgramCountRow {
-                        tokenizer_version: tv.clone(),
-                        n: key.n,
-                        ngram: key.ngram.clone(),
-                        bucket,
-                        count: *count,
-                    });
-                }
-            }
-
-            let mut total_rows = Vec::with_capacity(totals.len());
-            for (key, &total_count) in totals {
-                if let Ok(bucket) = parse_bucket_date(&key.bucket) {
-                    total_rows.push(BucketTotalRow {
-                        tokenizer_version: tv.clone(),
-                        n: key.n,
-                        bucket,
-                        total_count,
-                    });
-                }
-            }
-
-            let _ = tx.send(Pass2Result {
-                count_rows,
-                total_rows,
-                comment_count,
-                max_ts: file_max_ts,
-                rel_path: rel_path.to_string(),
-                elapsed_secs: file_start.elapsed().as_secs_f64(),
-            }).await;
-        });
-    }
-    drop(tx); // Close sender so receiver knows when all producers are done
-
-    // Consumer: write results as they arrive
-    while let Some(result) = rx.recv().await {
-        counts_writer.write_batch(&result.count_rows)?;
-        totals_writer.write_batch(&result.total_rows)?;
-
-        total_comments += result.comment_count;
-        total_count_rows += result.count_rows.len() as u64;
-        total_total_rows += result.total_rows.len() as u64;
-        max_ts = max_ts.max(result.max_ts);
-
-        tracing::info!(
-            "  {} — Comments: {} | Counts: {} | Totals: {} | Elapsed: {:.1}s",
-            result.rel_path,
-            result.comment_count,
-            result.count_rows.len(),
-            result.total_rows.len(),
-            result.elapsed_secs
-        );
-    }
+        Ok(())
+    })?;
 
     counts_writer.finish()?;
-    totals_writer.finish()?;
+    tracing::info!("Wrote {} ngram count rows to parquet", total_count_rows);
 
-    // Write vocabulary parquet (using vocab_counts from streaming merge)
+    // ================================================================
+    // Merge 3: totals → bucket_totals.parquet (no filtering)
+    // ================================================================
+    tracing::info!("Merge 3: totals → bucket_totals.parquet");
+
+    let totals_path = output_dir.join("bucket_totals.parquet");
+    let mut totals_writer = parquet_writer::BucketTotalsWriter::new(&totals_path)?;
+    let mut total_total_rows = 0u64;
+
+    vocabulary::merge_totals_streaming(data_dir, |entry| {
+        let bucket = parse_bucket_date(&entry.bucket)?;
+
+        // Track max timestamp from bucket dates for watermark
+        let epoch = time::Date::from_ordinal_date(1970, 1).unwrap();
+        let days = (bucket - epoch).whole_days();
+        let bucket_end_ms = (days + 1) * 86400 * 1000; // end of day
+        max_ts = max_ts.max(bucket_end_ms);
+
+        totals_writer.write_batch(&[BucketTotalRow {
+            tokenizer_version: tv.clone(),
+            n: entry.n,
+            bucket,
+            total_count: entry.total,
+        }])?;
+        total_total_rows += 1;
+
+        Ok(())
+    })?;
+
+    totals_writer.finish()?;
+    tracing::info!("Wrote {} bucket total rows to parquet", total_total_rows);
+
+    // ================================================================
+    // Write vocabulary + ingestion_log parquet
+    // ================================================================
+
     let now = time::OffsetDateTime::now_utc();
     let vocab_rows: Vec<NgramVocabularyRow> = vocab_counts
         .iter()
@@ -643,15 +628,12 @@ async fn process_parquet(
     parquet_writer::write_vocabulary_parquet(&vocab_path, &vocab_rows)?;
     tracing::info!("Wrote {} vocabulary rows", vocab_rows.len());
 
-    // global_counts.parquet was already written during the streaming merge
-
-    // Write ingestion_log parquet
     let duration = run_start.elapsed();
     let log_row = IngestionLogRow {
         tokenizer_version: tv,
         command: "process".to_string(),
         last_ingested_ts: max_ts,
-        comments_processed: total_comments,
+        comments_processed: 0, // not tracked in single-pass (would need source-level counting)
         ngram_counts_inserted: total_count_rows,
         bucket_totals_inserted: total_total_rows,
         vocabulary_inserted: vocab_rows.len() as u64,
@@ -664,8 +646,7 @@ async fn process_parquet(
     parquet_writer::write_ingestion_log_parquet(&log_path, &log_row)?;
 
     tracing::info!(
-        "Processing complete — {} comments, {} count rows, {} total rows, {:.1}s",
-        total_comments,
+        "Processing complete — {} count rows, {} total rows, {:.1}s",
         total_count_rows,
         total_total_rows,
         duration.as_secs_f64()
