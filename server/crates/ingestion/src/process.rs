@@ -38,9 +38,12 @@ pub struct ProcessConfig {
 
 impl Default for ProcessConfig {
     fn default() -> Self {
+        let producer_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
         Self {
             max_entries: 20_000_000,
-            producer_count: 2,
+            producer_count,
             config_path: None,
         }
     }

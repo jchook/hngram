@@ -177,7 +177,7 @@ pub fn process_comments_parallel(comments: &[Comment]) -> NgramCounter {
         return NgramCounter::new();
     }
 
-    let counters: Vec<NgramCounter> = comments
+    comments
         .par_chunks(1024)
         .map(|chunk| {
             let mut counter = NgramCounter::new();
@@ -187,13 +187,10 @@ pub fn process_comments_parallel(comments: &[Comment]) -> NgramCounter {
             }
             counter
         })
-        .collect();
-
-    let mut merged = NgramCounter::new();
-    for c in counters {
-        merged.merge(c);
-    }
-    merged
+        .reduce(NgramCounter::new, |mut a, b| {
+            a.merge(b);
+            a
+        })
 }
 
 #[cfg(test)]

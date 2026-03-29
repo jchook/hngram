@@ -6,6 +6,7 @@
 //! - Pruning by global and per-bucket thresholds
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Per-n pruning thresholds
 #[derive(Debug, Clone)]
@@ -93,9 +94,12 @@ impl PruningConfig {
 }
 
 /// Key for n-gram counts: (bucket, n, ngram)
+///
+/// Bucket uses `Arc<str>` so that all keys from the same comment share one
+/// allocation instead of cloning the date string per n-gram.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NgramKey {
-    pub bucket: String, // YYYY-MM-DD format
+    pub bucket: Arc<str>, // YYYY-MM-DD format
     pub n: u8,
     pub ngram: String,
 }
@@ -103,7 +107,7 @@ pub struct NgramKey {
 /// Key for bucket totals: (bucket, n)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BucketKey {
-    pub bucket: String,
+    pub bucket: Arc<str>,
     pub n: u8,
 }
 
@@ -128,6 +132,11 @@ impl NgramCounter {
             return;
         }
 
+        // Single Arc allocation shared across all keys from this comment
+        let bucket: Arc<str> = Arc::from(bucket);
+        // Reusable buffer avoids repeated growth when building n-gram strings
+        let mut ngram_buf = String::new();
+
         // Generate and count 1-grams, 2-grams, 3-grams
         for n in 1..=3u8 {
             let n_usize = n as usize;
@@ -139,18 +148,24 @@ impl NgramCounter {
 
             // Update total for this bucket/n
             let bucket_key = BucketKey {
-                bucket: bucket.to_string(),
+                bucket: bucket.clone(),
                 n,
             };
             *self.totals.entry(bucket_key).or_insert(0) += ngram_count as u64;
 
             // Count each n-gram
             for window in tokens.windows(n_usize) {
-                let ngram = window.join(" ");
+                ngram_buf.clear();
+                for (i, token) in window.iter().enumerate() {
+                    if i > 0 {
+                        ngram_buf.push(' ');
+                    }
+                    ngram_buf.push_str(token);
+                }
                 let key = NgramKey {
-                    bucket: bucket.to_string(),
+                    bucket: bucket.clone(),
                     n,
-                    ngram,
+                    ngram: ngram_buf.clone(),
                 };
                 *self.counts.entry(key).or_insert(0) += 1;
             }
@@ -300,7 +315,7 @@ mod tests {
         // 1-grams
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1,
                 ngram: "rust".to_string()
             }),
@@ -308,7 +323,7 @@ mod tests {
         );
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1,
                 ngram: "is".to_string()
             }),
@@ -316,7 +331,7 @@ mod tests {
         );
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1,
                 ngram: "fast".to_string()
             }),
@@ -326,7 +341,7 @@ mod tests {
         // 2-grams
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2,
                 ngram: "rust is".to_string()
             }),
@@ -334,7 +349,7 @@ mod tests {
         );
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2,
                 ngram: "is fast".to_string()
             }),
@@ -344,7 +359,7 @@ mod tests {
         // 3-grams
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 3,
                 ngram: "rust is fast".to_string()
             }),
@@ -355,21 +370,21 @@ mod tests {
         let totals = counter.totals();
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1
             }),
             Some(&3)
         );
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2
             }),
             Some(&2)
         );
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 3
             }),
             Some(&1)
@@ -387,7 +402,7 @@ mod tests {
         let totals = counter.totals();
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1
             }),
             Some(&1)
@@ -395,14 +410,14 @@ mod tests {
         // No bigrams or trigrams from single token
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2
             }),
             None
         );
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 3
             }),
             None
@@ -466,7 +481,7 @@ mod tests {
         // "rust" should appear twice
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1,
                 ngram: "rust".to_string()
             }),
@@ -476,7 +491,7 @@ mod tests {
         // "rust is" should appear twice
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2,
                 ngram: "rust is".to_string()
             }),
@@ -487,7 +502,7 @@ mod tests {
         let totals = counter1.totals();
         assert_eq!(
             totals.get(&BucketKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1
             }),
             Some(&6)
@@ -578,21 +593,21 @@ mod tests {
 
         // Unigram should be kept
         assert!(pruned.contains_key(&NgramKey {
-            bucket: bucket.to_string(),
+            bucket: Arc::from(bucket),
             n: 1,
             ngram: "rare".to_string()
         }));
 
         // Low count bigram should be pruned
         assert!(!pruned.contains_key(&NgramKey {
-            bucket: bucket.to_string(),
+            bucket: Arc::from(bucket),
             n: 2,
             ngram: "low count".to_string()
         }));
 
         // High count bigram should be kept
         assert!(pruned.contains_key(&NgramKey {
-            bucket: bucket.to_string(),
+            bucket: Arc::from(bucket),
             n: 2,
             ngram: "high count".to_string()
         }));
@@ -612,7 +627,7 @@ mod tests {
         let counts = counter.counts();
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 1,
                 ngram: "ai".to_string()
             }),
@@ -622,7 +637,7 @@ mod tests {
         // "ai ai" appears 4 times
         assert_eq!(
             counts.get(&NgramKey {
-                bucket: "2024-01-01".to_string(),
+                bucket: Arc::from("2024-01-01"),
                 n: 2,
                 ngram: "ai ai".to_string()
             }),

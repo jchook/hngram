@@ -194,6 +194,12 @@ struct KWayMerge {
     readers: Vec<std::io::BufReader<std::fs::File>>,
     bufs: Vec<String>,
     heap: BinaryHeap<Reverse<(String, usize)>>,
+    /// Total bytes across all input files (for progress reporting).
+    total_bytes: u64,
+    /// Bytes consumed so far (approximated by line lengths).
+    bytes_read: u64,
+    /// Last reported progress percentage (to avoid spamming logs).
+    last_reported_pct: u8,
 }
 
 impl KWayMerge {
@@ -201,8 +207,12 @@ impl KWayMerge {
         let mut readers = Vec::with_capacity(paths.len());
         let mut bufs = Vec::with_capacity(paths.len());
         let mut heap = BinaryHeap::new();
+        let mut total_bytes = 0u64;
 
         for (i, path) in paths.iter().enumerate() {
+            total_bytes += std::fs::metadata(path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             let file = std::fs::File::open(path)
                 .with_context(|| format!("Failed to open {}", path.display()))?;
             let mut reader = std::io::BufReader::new(file);
@@ -220,11 +230,16 @@ impl KWayMerge {
             readers,
             bufs,
             heap,
+            total_bytes,
+            bytes_read: 0,
+            last_reported_pct: 0,
         })
     }
 
     fn pop(&mut self) -> anyhow::Result<Option<String>> {
         if let Some(Reverse((line, idx))) = self.heap.pop() {
+            // +1 for the newline character
+            self.bytes_read += line.len() as u64 + 1;
             if let Some(next) = read_next_line(&mut self.readers[idx], &mut self.bufs[idx])? {
                 self.heap.push(Reverse((next, idx)));
             }
@@ -236,6 +251,21 @@ impl KWayMerge {
 
     fn peek_line(&self) -> Option<&str> {
         self.heap.peek().map(|Reverse((line, _))| line.as_str())
+    }
+
+    /// Log progress at 10% increments. Returns true if progress was logged.
+    fn log_progress(&mut self, label: &str) -> bool {
+        if self.total_bytes == 0 {
+            return false;
+        }
+        let pct = (self.bytes_read * 100 / self.total_bytes).min(100) as u8;
+        let bucket = pct / 10 * 10; // round down to nearest 10%
+        if bucket > self.last_reported_pct && bucket < 100 {
+            self.last_reported_pct = bucket;
+            tracing::info!("  {} merge: {}%", label, bucket);
+            return true;
+        }
+        false
     }
 }
 
@@ -297,11 +327,10 @@ where
                     count: total,
                 })?;
                 merged_count += 1;
-                if merged_count % 1_000_000 == 0 {
-                    tracing::info!("  Merged {} unique n-grams so far...", merged_count);
-                }
             }
         }
+
+        merger.log_progress("Globals");
     }
 
     tracing::info!("Globals merge complete — {} unique n-grams", merged_count);
@@ -362,10 +391,9 @@ where
             })?;
 
             merged_count += 1;
-            if merged_count % 5_000_000 == 0 {
-                tracing::info!("  Merged {} count entries so far...", merged_count);
-            }
         }
+
+        merger.log_progress("Counts");
     }
 
     tracing::info!("Counts merge complete — {} entries", merged_count);
@@ -422,6 +450,8 @@ where
             })?;
             merged_count += 1;
         }
+
+        merger.log_progress("Totals");
     }
 
     tracing::info!("Totals merge complete — {} entries", merged_count);
