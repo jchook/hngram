@@ -1,0 +1,16 @@
+# Aggressive pruning for fast dev/testing.
+# Only keeps very common n-grams — much smaller dataset.
+#
+# Usage: cargo run -p ingestion -- process --output parquet --config ingestion.dev.toml
+
+[pruning.1]
+min_global = 0
+min_bucket = 5
+
+[pruning.2]
+min_global = 500
+min_bucket = 10
+
+[pruning.3]
+min_global = 200
+min_bucket = 15

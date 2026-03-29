@@ -29,6 +29,9 @@ dotenvy.workspace = true
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Config file support
+toml = "0.8"
+
 # Parquet / Arrow
 parquet = { version = "53", default-features = false, features = ["arrow", "zstd", "snap"] }
 arrow = { version = "53", default-features = false }

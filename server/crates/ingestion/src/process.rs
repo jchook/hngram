@@ -12,7 +12,9 @@ use hn_clickhouse::{
     BucketTotalRow, GlobalCountRow, HnClickHouse, IngestionLogRow, NgramCountRow,
     NgramVocabularyRow,
 };
-use std::path::Path;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokenizer::counter::{build_vocabulary, BucketKey, NgramKey, PruningConfig};
 use tokenizer::TOKENIZER_VERSION;
 
@@ -30,6 +32,8 @@ pub struct ProcessConfig {
     pub max_entries: usize,
     /// Number of concurrent file-processing workers.
     pub producer_count: usize,
+    /// Optional path to TOML config file for pruning thresholds.
+    pub config_path: Option<PathBuf>,
 }
 
 impl Default for ProcessConfig {
@@ -37,8 +41,55 @@ impl Default for ProcessConfig {
         Self {
             max_entries: 20_000_000,
             producer_count: 2,
+            config_path: None,
         }
     }
+}
+
+/// TOML file structure for ingestion configuration.
+#[derive(Debug, Deserialize)]
+struct IngestionConfigFile {
+    pruning: Option<HashMap<String, PruningThresholdToml>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PruningThresholdToml {
+    min_global: Option<u64>,
+    min_bucket: Option<u32>,
+}
+
+/// Load PruningConfig from TOML file if provided, otherwise from env vars.
+/// Precedence: env vars > TOML file > hardcoded defaults.
+fn load_pruning_config(config_path: &Option<PathBuf>) -> anyhow::Result<PruningConfig> {
+    let mut config = match config_path {
+        Some(path) => {
+            let contents = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read config file {}", path.display()))?;
+            let file: IngestionConfigFile = toml::from_str(&contents)
+                .with_context(|| format!("Failed to parse config file {}", path.display()))?;
+
+            let mut config = PruningConfig::default();
+            if let Some(pruning) = file.pruning {
+                for (key, thresh) in pruning {
+                    let n: u8 = key.parse()
+                        .with_context(|| format!("Invalid n-gram order '{}' in [pruning]", key))?;
+                    config.set_threshold(n, thresh.min_global, thresh.min_bucket);
+                }
+            }
+            tracing::info!("Loaded pruning config from {}", path.display());
+            config
+        }
+        None => PruningConfig::default(),
+    };
+    // Env vars always overlay
+    config.apply_env();
+    tracing::info!(
+        "Pruning thresholds — 1gram: global={}, bucket={} | 2gram: global={}, bucket={} | 3gram: global={}, bucket={}",
+        config.min_global_count(1), config.min_bucket_count(1),
+        config.min_global_count(2), config.min_bucket_count(2),
+        config.min_global_count(3), config.min_bucket_count(3),
+    );
+    Ok(config)
 }
 
 // ============================================================================
@@ -57,7 +108,7 @@ pub async fn process(
     match mode {
         OutputMode::ClickHouse => {
             let ch = ch.expect("ClickHouse connection required for clickhouse output mode");
-            process_clickhouse(data_dir, months, start, end, ch).await
+            process_clickhouse(data_dir, months, start, end, ch, config).await
         }
         OutputMode::Parquet => process_parquet(data_dir, months, start, end, config).await,
     }
@@ -73,8 +124,9 @@ async fn process_clickhouse(
     start: &YearMonth,
     end: &YearMonth,
     ch: &HnClickHouse,
+    proc_config: &ProcessConfig,
 ) -> anyhow::Result<()> {
-    let config = PruningConfig::from_env();
+    let config = load_pruning_config(&proc_config.config_path)?;
     let tv = TOKENIZER_VERSION.to_string();
     let total = months.len();
     let run_start = std::time::Instant::now();
@@ -298,7 +350,7 @@ async fn process_parquet(
     end: &YearMonth,
     proc_config: &ProcessConfig,
 ) -> anyhow::Result<()> {
-    let config = PruningConfig::from_env();
+    let config = load_pruning_config(&proc_config.config_path)?;
     let tv = TOKENIZER_VERSION.to_string();
     let total = months.len();
     let run_start = std::time::Instant::now();

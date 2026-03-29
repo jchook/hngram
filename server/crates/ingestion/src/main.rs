@@ -63,6 +63,9 @@ enum Command {
         /// Concurrent file processing workers
         #[arg(long, default_value = "2")]
         producer_count: usize,
+        /// Path to TOML config file for pruning thresholds
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 
     /// Load Parquet output into ClickHouse with atomic table swap
@@ -128,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
             output,
             max_entries,
             producer_count,
+            config,
         } => {
             let start = YearMonth::parse(&start)?;
             let end = parse_end(&end)?;
@@ -159,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
             let proc_config = process::ProcessConfig {
                 max_entries,
                 producer_count,
+                config_path: config,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)
                 .await?;

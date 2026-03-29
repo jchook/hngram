@@ -38,6 +38,25 @@ impl Default for PruningConfig {
 }
 
 impl PruningConfig {
+    /// Build from an iterator of (n, threshold) pairs, with defaults as the base.
+    pub fn from_thresholds(iter: impl IntoIterator<Item = (u8, NgramThreshold)>) -> Self {
+        let mut config = Self::default();
+        for (n, t) in iter {
+            config.thresholds.insert(n, t);
+        }
+        config
+    }
+
+    /// Set a single threshold, merging with any existing value for that n.
+    pub fn set_threshold(&mut self, n: u8, min_global: Option<u64>, min_bucket: Option<u32>) {
+        let base = self.thresholds.get(&n).cloned()
+            .unwrap_or(NgramThreshold { min_global: 0, min_bucket: 1 });
+        self.thresholds.insert(n, NgramThreshold {
+            min_global: min_global.unwrap_or(base.min_global),
+            min_bucket: min_bucket.unwrap_or(base.min_bucket),
+        });
+    }
+
     /// Load from environment variables, falling back to defaults.
     ///
     /// Env vars follow the pattern:
@@ -45,22 +64,21 @@ impl PruningConfig {
     ///   PRUNE_MIN_{N}GRAM_BUCKET  (e.g. PRUNE_MIN_2GRAM_BUCKET=5)
     pub fn from_env() -> Self {
         let mut config = Self::default();
+        config.apply_env();
+        config
+    }
+
+    /// Overlay environment variables onto existing config.
+    pub fn apply_env(&mut self) {
         for n in 1..=9u8 {
             let global_key = format!("PRUNE_MIN_{}GRAM_GLOBAL", n);
             let bucket_key = format!("PRUNE_MIN_{}GRAM_BUCKET", n);
             let global = std::env::var(&global_key).ok().and_then(|v| v.parse().ok());
             let bucket = std::env::var(&bucket_key).ok().and_then(|v| v.parse().ok());
             if global.is_some() || bucket.is_some() {
-                let existing = config.thresholds.get(&n).cloned();
-                let default_t = NgramThreshold { min_global: 0, min_bucket: 1 };
-                let base = existing.as_ref().unwrap_or(&default_t);
-                config.thresholds.insert(n, NgramThreshold {
-                    min_global: global.unwrap_or(base.min_global),
-                    min_bucket: bucket.unwrap_or(base.min_bucket),
-                });
+                self.set_threshold(n, global, bucket);
             }
         }
-        config
     }
 
     /// Get the minimum global count threshold for a given n
