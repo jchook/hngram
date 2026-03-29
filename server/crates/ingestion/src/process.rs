@@ -372,10 +372,12 @@ async fn process_parquet(
 
         for (i, rel_path, local_path) in source_files {
             let tx = tx.clone();
-            let sem = sem.clone();
+
+            // Acquire permit before spawning to guarantee FIFO start order
+            let permit = sem.clone().acquire_owned().await.unwrap();
 
             tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
+                let _permit = permit;
                 tracing::info!("Processing: {} ({}/{})", rel_path, i + 1, total);
 
                 let path = local_path;
