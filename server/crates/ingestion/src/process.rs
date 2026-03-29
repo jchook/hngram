@@ -422,6 +422,89 @@ async fn process_parquet(
 
         let file_count = source_files.len();
 
+        // Consumer must run concurrently with the producer-spawning loop.
+        // Otherwise: producers fill the channel, block on send, hold semaphore
+        // permits, and the spawning loop deadlocks waiting for a permit.
+        let data_dir_owned = data_dir.to_path_buf();
+        let max_entries = proc_config.max_entries;
+        let consumer = tokio::spawn(async move {
+            let data_dir = &data_dir_owned;
+            let mut globals: std::collections::HashMap<(u8, String), u64> =
+                std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<NgramKey, u32> =
+                std::collections::HashMap::new();
+            let mut totals: std::collections::HashMap<BucketKey, u64> =
+                std::collections::HashMap::new();
+
+            let mut partial_counter = vocabulary::next_partial_counter(data_dir);
+            let mut flush_count = 0u32;
+
+            // Files completed since last flush (will be added to done set on flush)
+            let mut pending_done: Vec<String> = Vec::new();
+
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Msg::Batch(batch_counter) => {
+                        let batch_globals = batch_counter.global_counts();
+                        for ((n, ngram), count) in batch_globals {
+                            *globals.entry((n, ngram)).or_insert(0) += count;
+                        }
+                        for (key, &count) in batch_counter.counts() {
+                            *counts.entry(key.clone()).or_insert(0) += count;
+                        }
+                        for (key, &total) in batch_counter.totals() {
+                            *totals.entry(key.clone()).or_insert(0) += total;
+                        }
+
+                        // Check flush threshold: globals.len() + counts.len()
+                        if globals.len() + counts.len() >= max_entries {
+                            let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
+                            let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
+                            let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
+                            vocabulary::write_globals(&g_path, &globals)?;
+                            vocabulary::write_counts(&c_path, &counts)?;
+                            vocabulary::write_totals(&t_path, &totals)?;
+                            // Mark pending files as durably flushed
+                            vocabulary::append_done_files(data_dir, &pending_done)?;
+                            tracing::info!(
+                                "  Flushed partial {} (globals: {}, counts: {}, totals: {}, files done: +{})",
+                                partial_counter, globals.len(), counts.len(), totals.len(), pending_done.len()
+                            );
+                            globals.clear();
+                            counts.clear();
+                            totals.clear();
+                            pending_done.clear();
+                            partial_counter += 1;
+                            flush_count += 1;
+                        }
+                    }
+                    Msg::FileDone(rel_path) => {
+                        pending_done.push(rel_path);
+                    }
+                }
+            }
+
+            // Flush remaining
+            if !globals.is_empty() || !counts.is_empty() {
+                let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
+                let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
+                let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
+                vocabulary::write_globals(&g_path, &globals)?;
+                vocabulary::write_counts(&c_path, &counts)?;
+                vocabulary::write_totals(&t_path, &totals)?;
+                vocabulary::append_done_files(data_dir, &pending_done)?;
+                tracing::info!(
+                    "  Flushed final partial {} (globals: {}, counts: {}, totals: {})",
+                    partial_counter, globals.len(), counts.len(), totals.len()
+                );
+                flush_count += 1;
+            }
+
+            vocabulary::mark_pass_complete(data_dir)?;
+            Ok::<(u32,), anyhow::Error>((flush_count,))
+        });
+
+        // Producer spawning loop — runs concurrently with consumer above
         for (i, rel_path, local_path) in source_files {
             let tx = tx.clone();
 
@@ -454,80 +537,8 @@ async fn process_parquet(
         }
         drop(tx);
 
-        // Consumer: three accumulators, flush together at threshold.
-        // Also tracks which source files have been durably flushed for resume.
-        let mut globals: std::collections::HashMap<(u8, String), u64> =
-            std::collections::HashMap::new();
-        let mut counts: std::collections::HashMap<NgramKey, u32> =
-            std::collections::HashMap::new();
-        let mut totals: std::collections::HashMap<BucketKey, u64> =
-            std::collections::HashMap::new();
-
-        let mut partial_counter = vocabulary::next_partial_counter(data_dir);
-        let mut flush_count = 0u32;
-
-        // Files completed since last flush (will be added to done set on flush)
-        let mut pending_done: Vec<String> = Vec::new();
-
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                Msg::Batch(batch_counter) => {
-                    let batch_globals = batch_counter.global_counts();
-                    for ((n, ngram), count) in batch_globals {
-                        *globals.entry((n, ngram)).or_insert(0) += count;
-                    }
-                    for (key, &count) in batch_counter.counts() {
-                        *counts.entry(key.clone()).or_insert(0) += count;
-                    }
-                    for (key, &total) in batch_counter.totals() {
-                        *totals.entry(key.clone()).or_insert(0) += total;
-                    }
-
-                    // Check flush threshold: globals.len() + counts.len()
-                    if globals.len() + counts.len() >= proc_config.max_entries {
-                        let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
-                        let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
-                        let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
-                        vocabulary::write_globals(&g_path, &globals)?;
-                        vocabulary::write_counts(&c_path, &counts)?;
-                        vocabulary::write_totals(&t_path, &totals)?;
-                        // Mark pending files as durably flushed
-                        vocabulary::append_done_files(data_dir, &pending_done)?;
-                        tracing::info!(
-                            "  Flushed partial {} (globals: {}, counts: {}, totals: {}, files done: +{})",
-                            partial_counter, globals.len(), counts.len(), totals.len(), pending_done.len()
-                        );
-                        globals.clear();
-                        counts.clear();
-                        totals.clear();
-                        pending_done.clear();
-                        partial_counter += 1;
-                        flush_count += 1;
-                    }
-                }
-                Msg::FileDone(rel_path) => {
-                    pending_done.push(rel_path);
-                }
-            }
-        }
-
-        // Flush remaining
-        if !globals.is_empty() || !counts.is_empty() {
-            let g_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "globals");
-            let c_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "counts");
-            let t_path = vocabulary::numbered_partial_path(data_dir, partial_counter, "totals");
-            vocabulary::write_globals(&g_path, &globals)?;
-            vocabulary::write_counts(&c_path, &counts)?;
-            vocabulary::write_totals(&t_path, &totals)?;
-            vocabulary::append_done_files(data_dir, &pending_done)?;
-            tracing::info!(
-                "  Flushed final partial {} (globals: {}, counts: {}, totals: {})",
-                partial_counter, globals.len(), counts.len(), totals.len()
-            );
-            flush_count += 1;
-        }
-
-        vocabulary::mark_pass_complete(data_dir)?;
+        // Wait for consumer to finish processing all messages
+        let (flush_count,) = consumer.await??;
         tracing::info!(
             "Source processing complete — {} files, {} partial flushes",
             file_count,
