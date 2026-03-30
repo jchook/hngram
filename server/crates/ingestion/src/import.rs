@@ -97,7 +97,9 @@ pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
 // ============================================================================
 
 /// Batch size for chunked Parquet import (rows per POST).
-const IMPORT_BATCH_SIZE: usize = 100_000;
+/// Larger batches = fewer ClickHouse parts to merge, but more memory per chunk.
+/// 500K rows keeps each Parquet chunk under ~50MB while minimizing part count.
+const IMPORT_BATCH_SIZE: usize = 500_000;
 
 /// Stream a Parquet file to ClickHouse in chunks.
 ///
