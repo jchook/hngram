@@ -1,20 +1,27 @@
-# Extreme pruning for smoke tests — very small dataset, fast iteration.
+# Smoke-test config: run the full pipeline (process + import) quickly on a
+# small date range with aggressive pruning. Designed to surface bugs and
+# verify end-to-end correctness, not to produce realistic output.
 #
 # Usage: just ingest-test
 
 [process]
 output = "parquet"
-start = "2011-01"
-end = "2011-12"
+start = "2024-01"
+end = "2024-12"
 
+# Aggressive thresholds — only very common n-grams survive, producing tiny
+# output files that import fast and fit in memory-constrained environments.
 [process.prune.1]
 min_global = 500
 min_bucket = 100
+min_flush = 2
 
 [process.prune.2]
 min_global = 20000
 min_bucket = 500
+min_flush = 3
 
 [process.prune.3]
 min_global = 50000
 min_bucket = 1000
+min_flush = 5

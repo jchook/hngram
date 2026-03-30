@@ -1,0 +1,73 @@
+# Ingestion pipeline configuration for HN N-gram Viewer.
+#
+# Copy this file and customize for your environment:
+#   cp ingestion.example.toml ingestion.local.toml
+#   cargo run -p ingestion -- process --config ingestion.local.toml
+#
+# See also:
+#   ingestion.test.toml  — aggressive pruning for quick smoke tests
+#   ingestion.dev.toml   — moderate pruning for local development
+#   ingestion.prod.toml  — minimal pruning for production
+
+[process]
+
+# Output mode: "parquet" or "clickhouse".
+#   parquet    — full rebuild: writes Parquet files to output/, then import separately
+#   clickhouse — incremental: inserts directly into ClickHouse using watermark
+output = "parquet"
+
+# Date range to process (YYYY-MM). Defaults: start=2006-10, end=current month.
+# start = "2006-10"
+# end = "2026-03"
+
+# Flush threshold: the consumer accumulates n-gram counts in memory and flushes
+# to sharded binary files when the entry count exceeds this value. Higher values
+# use more RAM but produce fewer partial files (faster merge). Default: 20000000.
+# max_entries = 20000000
+
+# Number of concurrent file-processing workers. Each worker reads a source
+# Parquet file, tokenizes comments, and streams counts to the consumer.
+# Default: number of CPU cores.
+# producer_count = 8
+
+# Number of shards for parallel merge. During merge, each shard is processed
+# independently on its own thread. More shards = more parallelism but more
+# file handles. Default: number of CPU cores.
+# merge_shards = 32
+
+# Pruning thresholds — per n-gram order (1=unigram, 2=bigram, 3=trigram).
+#
+# Three levels of filtering, applied at different pipeline stages:
+#
+#   min_flush  — Applied during flush (earliest). N-grams appearing fewer than
+#                this many times within a single flush batch are discarded before
+#                writing to shard files. This is the highest-leverage filter:
+#                most unique n-grams in any batch are singletons that will never
+#                reach any global threshold. Cutting them here dramatically
+#                reduces partial file size, merge time, and memory usage.
+#
+#   min_global — Applied during merge (vocabulary admission). An n-gram must
+#                appear at least this many times across the entire corpus to be
+#                admitted to the vocabulary. Non-admitted bigrams and trigrams
+#                are excluded from the final output. Unigrams with min_global=0
+#                are always admitted.
+#
+#   min_bucket — Applied during output (per-day filtering). Even for admitted
+#                n-grams, a per-day count below this threshold is excluded from
+#                ngram_counts. This reduces noise from n-grams that appear only
+#                once or twice on a given day.
+
+[process.prune.1]
+min_global = 0      # unigrams: always admitted (small vocabulary, high frequency)
+min_bucket = 1      # keep all daily counts
+min_flush = 1       # keep all — unigram singletons are real words
+
+[process.prune.2]
+min_global = 20     # bigrams must appear 20+ times corpus-wide
+min_bucket = 3      # need 3+ occurrences on a single day
+min_flush = 2       # filter singletons per flush batch
+
+[process.prune.3]
+min_global = 10     # trigrams must appear 10+ times corpus-wide
+min_bucket = 5      # need 5+ occurrences on a single day
+min_flush = 2       # filter singletons per flush batch

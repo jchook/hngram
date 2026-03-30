@@ -48,6 +48,7 @@ pub struct ProcessSection {
 pub struct PruneThreshold {
     pub min_global: Option<u64>,
     pub min_bucket: Option<u32>,
+    pub min_flush: Option<u32>,
 }
 
 // ============================================================================
@@ -74,16 +75,16 @@ pub fn resolve_pruning(prune: &Option<HashMap<String, PruneThreshold>>) -> anyho
         for (key, thresh) in prune {
             let n: u8 = key.parse()
                 .with_context(|| format!("Invalid n-gram order '{}' in [process.prune]", key))?;
-            config.set_threshold(n, thresh.min_global, thresh.min_bucket);
+            config.set_threshold(n, thresh.min_global, thresh.min_bucket, thresh.min_flush);
         }
     }
     // Env vars always overlay
     config.apply_env();
-    tracing::info!(
-        "Pruning thresholds — 1gram: global={}, bucket={} | 2gram: global={}, bucket={} | 3gram: global={}, bucket={}",
-        config.min_global_count(1), config.min_bucket_count(1),
-        config.min_global_count(2), config.min_bucket_count(2),
-        config.min_global_count(3), config.min_bucket_count(3),
-    );
+    for n in 1..=3u8 {
+        tracing::info!(
+            "  {}gram: global={}, bucket={}, flush={}",
+            n, config.min_global_count(n), config.min_bucket_count(n), config.min_flush_count(n),
+        );
+    }
     Ok(config)
 }

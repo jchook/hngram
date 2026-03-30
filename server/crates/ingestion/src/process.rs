@@ -260,8 +260,11 @@ async fn process_clickhouse(
     // Persist state if any new comments were processed
     if max_ts > watermark {
         // Save updated global counts to ClickHouse (ReplacingMergeTree deduplicates)
+        // Filter out n-grams that can never pass any admission threshold.
+        let min_gc_export = config.min_global_export();
         let gc_rows: Vec<GlobalCountRow> = global_counts
             .iter()
+            .filter(|(_, &count)| count >= min_gc_export)
             .map(|((n, ngram), &count)| GlobalCountRow {
                 tokenizer_version: tv.clone(),
                 n: *n,
@@ -270,7 +273,7 @@ async fn process_clickhouse(
             })
             .collect();
         ch.insert_global_counts(&gc_rows).await?;
-        tracing::info!("Saved {} global count entries to ClickHouse", gc_rows.len());
+        tracing::info!("Saved {} global count entries to ClickHouse (min_export={})", gc_rows.len(), min_gc_export);
 
         let duration = run_start.elapsed();
         ch.insert_ingestion_log(&IngestionLogRow {
@@ -389,6 +392,7 @@ async fn process_parquet(
         let data_dir_owned = data_dir.to_path_buf();
         let max_entries = proc_config.max_entries;
         let num_shards = proc_config.merge_shards;
+        let flush_config = config.clone();
         let consumer = tokio::spawn(async move {
             let data_dir = &data_dir_owned;
             let mut counts: std::collections::HashMap<NgramKey, u32> =
@@ -409,11 +413,14 @@ async fn process_parquet(
 
                         // Flush when counts exceed threshold
                         if counts.len() >= max_entries {
+                            let before = counts.len();
+                            counts.retain(|key, count| *count >= flush_config.min_flush_count(key.n));
+                            let after = counts.len();
                             vocabulary::write_sharded(data_dir, partial_counter, num_shards, &counts)?;
                             vocabulary::append_done_files(data_dir, &pending_done)?;
                             tracing::info!(
-                                "  Flushed partial {} ({} counts → {} shards, files done: +{})",
-                                partial_counter, counts.len(), num_shards, pending_done.len()
+                                "  Flushed partial {} ({} → {} after flush pruning, {} shards, files done: +{})",
+                                partial_counter, before, after, num_shards, pending_done.len()
                             );
                             counts.clear();
                             pending_done.clear();
@@ -429,6 +436,7 @@ async fn process_parquet(
 
             // Flush remaining
             if !counts.is_empty() {
+                counts.retain(|key, count| *count >= flush_config.min_flush_count(key.n));
                 vocabulary::write_sharded(data_dir, partial_counter, num_shards, &counts)?;
                 vocabulary::append_done_files(data_dir, &pending_done)?;
                 tracing::info!(
@@ -517,11 +525,30 @@ async fn process_parquet(
     let mut total_unigrams = 0u64;
     let mut total_bigrams = 0u64;
     let mut total_trigrams = 0u64;
+    let min_gc_export = config.min_global_export();
     let globals_total = globals.len() as u64;
+    let mut skipped = 0u64;
     let mut last_pct = 0u8;
+
+    tracing::info!("  Filtering global_counts with min_global_export={}", min_gc_export);
 
     let mut vocab_counts: HashMap<(u8, String), u64> = HashMap::new();
     for ((n, ngram), &count) in &globals {
+        // Skip n-grams that can never pass any threshold
+        if count < min_gc_export {
+            skipped += 1;
+            // Still track progress against total
+            if globals_total > 0 {
+                let done = total_gc_rows + skipped;
+                let pct = (done * 100 / globals_total).min(100) as u8;
+                let bucket = pct / 10 * 10;
+                if bucket > last_pct && bucket < 100 {
+                    last_pct = bucket;
+                    tracing::info!("  Writing global_counts.parquet: {}%", bucket);
+                }
+            }
+            continue;
+        }
         gc_writer.write_one(&GlobalCountRow {
             tokenizer_version: tv.clone(),
             n: *n,
@@ -539,7 +566,8 @@ async fn process_parquet(
             vocab_counts.insert((*n, ngram.clone()), count);
         }
         if globals_total > 0 {
-            let pct = (total_gc_rows * 100 / globals_total).min(100) as u8;
+            let done = total_gc_rows + skipped;
+            let pct = (done * 100 / globals_total).min(100) as u8;
             let bucket = pct / 10 * 10;
             if bucket > last_pct && bucket < 100 {
                 last_pct = bucket;
@@ -548,6 +576,10 @@ async fn process_parquet(
         }
     }
     gc_writer.finish()?;
+    tracing::info!(
+        "  Exported {} global count rows, skipped {} below threshold",
+        total_gc_rows, skipped,
+    );
     drop(globals);
 
     let admitted_bigrams = vocabulary.iter().filter(|((n, _), _)| *n == 2).count();

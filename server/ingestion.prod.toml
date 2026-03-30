@@ -1,4 +1,5 @@
-# Production defaults.
+# Production config: low pruning thresholds to retain the broadest useful
+# vocabulary. Optimized for data quality over processing speed.
 #
 # Usage: cargo run -p ingestion -- process --config ingestion.prod.toml
 
@@ -8,11 +9,14 @@ output = "clickhouse"
 [process.prune.1]
 min_global = 0
 min_bucket = 1
+min_flush = 1
 
 [process.prune.2]
 min_global = 20
 min_bucket = 3
+min_flush = 2
 
 [process.prune.3]
 min_global = 10
 min_bucket = 5
+min_flush = 2

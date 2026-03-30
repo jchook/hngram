@@ -1,5 +1,6 @@
-# Aggressive pruning for fast dev/testing.
-# Only keeps very common n-grams — much smaller dataset.
+# Dev config: full corpus processing with moderate pruning. Produces a
+# smaller-than-prod dataset that's faster to iterate on while still
+# containing enough data to test queries and the frontend meaningfully.
 #
 # Usage: cargo run -p ingestion -- process --config ingestion.dev.toml
 
@@ -11,11 +12,14 @@ producer_count = 2
 [process.prune.1]
 min_global = 0
 min_bucket = 5
+min_flush = 1
 
 [process.prune.2]
 min_global = 500
 min_bucket = 10
+min_flush = 2
 
 [process.prune.3]
 min_global = 200
 min_bucket = 15
+min_flush = 3

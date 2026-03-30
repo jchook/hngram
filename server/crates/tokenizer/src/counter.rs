@@ -15,6 +15,9 @@ pub struct NgramThreshold {
     pub min_global: u64,
     /// Minimum per-bucket count to be included in daily aggregates
     pub min_bucket: u32,
+    /// Minimum count within a flush batch to survive to shard files.
+    /// Filters the long tail of rare n-grams at flush time.
+    pub min_flush: u32,
 }
 
 /// Configuration for n-gram pruning thresholds.
@@ -31,9 +34,9 @@ pub struct PruningConfig {
 impl Default for PruningConfig {
     fn default() -> Self {
         let mut thresholds = HashMap::new();
-        thresholds.insert(1, NgramThreshold { min_global: 0, min_bucket: 1 });
-        thresholds.insert(2, NgramThreshold { min_global: 20, min_bucket: 3 });
-        thresholds.insert(3, NgramThreshold { min_global: 10, min_bucket: 5 });
+        thresholds.insert(1, NgramThreshold { min_global: 0, min_bucket: 1, min_flush: 1 });
+        thresholds.insert(2, NgramThreshold { min_global: 20, min_bucket: 3, min_flush: 2 });
+        thresholds.insert(3, NgramThreshold { min_global: 10, min_bucket: 5, min_flush: 2 });
         Self { thresholds }
     }
 }
@@ -49,12 +52,13 @@ impl PruningConfig {
     }
 
     /// Set a single threshold, merging with any existing value for that n.
-    pub fn set_threshold(&mut self, n: u8, min_global: Option<u64>, min_bucket: Option<u32>) {
+    pub fn set_threshold(&mut self, n: u8, min_global: Option<u64>, min_bucket: Option<u32>, min_flush: Option<u32>) {
         let base = self.thresholds.get(&n).cloned()
-            .unwrap_or(NgramThreshold { min_global: 0, min_bucket: 1 });
+            .unwrap_or(NgramThreshold { min_global: 0, min_bucket: 1, min_flush: 1 });
         self.thresholds.insert(n, NgramThreshold {
             min_global: min_global.unwrap_or(base.min_global),
             min_bucket: min_bucket.unwrap_or(base.min_bucket),
+            min_flush: min_flush.unwrap_or(base.min_flush),
         });
     }
 
@@ -74,10 +78,12 @@ impl PruningConfig {
         for n in 1..=9u8 {
             let global_key = format!("PRUNE_MIN_{}GRAM_GLOBAL", n);
             let bucket_key = format!("PRUNE_MIN_{}GRAM_BUCKET", n);
+            let flush_key = format!("PRUNE_MIN_{}GRAM_FLUSH", n);
             let global = std::env::var(&global_key).ok().and_then(|v| v.parse().ok());
             let bucket = std::env::var(&bucket_key).ok().and_then(|v| v.parse().ok());
-            if global.is_some() || bucket.is_some() {
-                self.set_threshold(n, global, bucket);
+            let flush = std::env::var(&flush_key).ok().and_then(|v| v.parse().ok());
+            if global.is_some() || bucket.is_some() || flush.is_some() {
+                self.set_threshold(n, global, bucket, flush);
             }
         }
     }
@@ -90,6 +96,26 @@ impl PruningConfig {
     /// Get the minimum per-bucket count threshold for a given n
     pub fn min_bucket_count(&self, n: u8) -> u32 {
         self.thresholds.get(&n).map(|t| t.min_bucket).unwrap_or(u32::MAX)
+    }
+
+    /// Get the minimum flush count threshold for a given n
+    pub fn min_flush_count(&self, n: u8) -> u32 {
+        self.thresholds.get(&n).map(|t| t.min_flush).unwrap_or(1)
+    }
+
+    /// Minimum export threshold for global_counts: the lowest non-zero
+    /// `min_global` across all n-gram orders. N-grams below this count
+    /// can never be admitted to the vocabulary, so they can be excluded
+    /// from global_counts output. Returns 2 as a floor (count=1 n-grams
+    /// are always noise).
+    pub fn min_global_export(&self) -> u64 {
+        self.thresholds
+            .values()
+            .map(|t| t.min_global)
+            .filter(|&g| g > 0)
+            .min()
+            .unwrap_or(2)
+            .max(2)
     }
 }
 
