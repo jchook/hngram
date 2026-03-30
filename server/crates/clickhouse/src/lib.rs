@@ -624,6 +624,28 @@ impl HnClickHouse {
         Ok(rows.into_iter().map(|r| ((r.n, r.ngram), ())).collect())
     }
 
+    /// Get the global count for a specific n-gram
+    pub async fn get_global_count(&self, n: u8, ngram: &str) -> Result<u64> {
+        let query = format!(
+            r#"
+            SELECT count
+            FROM {TABLE_GLOBAL_COUNTS} FINAL
+            WHERE tokenizer_version = ? AND n = ? AND ngram = ?
+            "#
+        );
+
+        let result: Option<u64> = self
+            .client
+            .query(&query)
+            .bind(&self.tokenizer_version)
+            .bind(n)
+            .bind(ngram)
+            .fetch_optional()
+            .await?;
+
+        Ok(result.unwrap_or(0))
+    }
+
     /// Check if an n-gram exists in vocabulary
     pub async fn is_in_vocabulary(&self, n: u8, ngram: &str) -> Result<bool> {
         let query = format!(
