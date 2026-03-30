@@ -44,11 +44,8 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
     });
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') handleSubmit();
-  };
-
   return (
+    <form onSubmit={e => { e.preventDefault(); handleSubmit(); }}>
     <Stack gap="sm">
       <TextInput
         label="Phrases"
@@ -56,7 +53,6 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         description="Comma-separated phrases (max 10)"
         value={phrases}
         onChange={e => setPhrases(e.currentTarget.value)}
-        onKeyDown={handleKeyDown}
       />
       <Group grow>
         <DateInput
@@ -103,8 +99,9 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
             ]}
           />
         </div>
-        <Button onClick={handleSubmit}>Search</Button>
+        <Button type="submit">Search</Button>
       </Group>
     </Stack>
+    </form>
   );
 }
