@@ -34,6 +34,8 @@ pub struct ProcessConfig {
     pub producer_count: usize,
     /// Number of shards for parallel merge (default: available_parallelism).
     pub merge_shards: usize,
+    /// Bucket granularity for n-gram counts.
+    pub bucket_granularity: config::BucketGranularity,
     /// Pruning thresholds from TOML [process.prune] section.
     pub prune: Option<HashMap<String, config::PruneThreshold>>,
 }
@@ -47,6 +49,7 @@ impl Default for ProcessConfig {
             max_entries: 20_000_000,
             producer_count: cpus,
             merge_shards: cpus,
+            bucket_granularity: config::BucketGranularity::default(),
             prune: None,
         }
     }
@@ -133,8 +136,9 @@ async fn process_clickhouse(
         // Read only comments after the watermark
         let path = local_path.clone();
         let wm = watermark;
+        let granularity = proc_config.bucket_granularity;
         let comments =
-            tokio::task::spawn_blocking(move || parquet::read_comments_after(&path, wm)).await??;
+            tokio::task::spawn_blocking(move || parquet::read_comments_after(&path, wm, granularity)).await??;
 
         if comments.is_empty() {
             continue;
@@ -457,6 +461,7 @@ async fn process_parquet(
             // Acquire permit before spawning to guarantee FIFO start order
             let permit = sem.clone().acquire_owned().await.unwrap();
 
+            let granularity = proc_config.bucket_granularity;
             tokio::spawn(async move {
                 let _permit = permit;
                 tracing::info!("Processing: {} ({}/{})", rel_path, i + 1, total);
@@ -465,7 +470,7 @@ async fn process_parquet(
                 let rel = rel_path.clone();
                 let tx2 = tx.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    parquet::stream_counters(&path, 0, |counter| {
+                    parquet::stream_counters(&path, 0, granularity, |counter| {
                         tx.blocking_send(Msg::Batch(counter))
                             .map_err(|_| anyhow::anyhow!("Consumer dropped"))
                     })
@@ -737,7 +742,7 @@ mod parquet_writer {
             .set_compression(Compression::ZSTD(Default::default()))
             // Limit row group size so ClickHouse can import without loading
             // the entire file into memory at once.
-            .set_max_row_group_size(500_000)
+            .set_max_row_group_row_count(Some(500_000))
             .build()
     }
 

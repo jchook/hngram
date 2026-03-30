@@ -303,7 +303,7 @@ impl HnClickHouse {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(table)?;
+        let mut insert = self.client.insert::<NgramVocabularyRow>(table).await?;
         for row in rows {
             insert.write(row).await?;
         }
@@ -313,7 +313,7 @@ impl HnClickHouse {
 
     /// Insert a single ingestion log entry
     pub async fn insert_ingestion_log(&self, row: &IngestionLogRow) -> Result<()> {
-        let mut insert = self.client.insert(TABLE_INGESTION_LOG)?;
+        let mut insert = self.client.insert::<IngestionLogRow>(TABLE_INGESTION_LOG).await?;
         insert.write(row).await?;
         insert.end().await?;
         Ok(())
@@ -405,7 +405,7 @@ impl HnClickHouse {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(table)?;
+        let mut insert = self.client.insert::<GlobalCountRow>(table).await?;
         for row in rows {
             insert.write(row).await?;
         }
@@ -460,7 +460,7 @@ impl HnClickHouse {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(table)?;
+        let mut insert = self.client.insert::<NgramCountRow>(table).await?;
         for row in rows {
             insert.write(row).await?;
         }
@@ -478,7 +478,7 @@ impl HnClickHouse {
             return Ok(());
         }
 
-        let mut insert = self.client.insert(table)?;
+        let mut insert = self.client.insert::<BucketTotalRow>(table).await?;
         for row in rows {
             insert.write(row).await?;
         }

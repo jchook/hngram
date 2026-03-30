@@ -15,6 +15,7 @@ pub use serde::{Deserialize, Serialize};
 pub use std::sync::Arc;
 pub use time::macros::format_description;
 pub use time::Date;
+pub use tower::limit::ConcurrencyLimitLayer;
 pub use tower_http::{cors::CorsLayer, trace::TraceLayer};
 pub use utoipa::{IntoParams, OpenApi, ToSchema};
 
@@ -60,6 +61,7 @@ pub fn api_router(state: Arc<AppState>) -> Router {
         )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(ConcurrencyLimitLayer::new(64))
         .with_state(state)
 }
 
