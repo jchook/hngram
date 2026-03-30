@@ -1,5 +1,5 @@
 {
-  "openapi": "3.0.3",
+  "openapi": "3.1.0",
   "info": {
     "title": "api",
     "description": "",
@@ -11,9 +11,7 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": [
-          "crate"
-        ],
+        "tags": [],
         "operationId": "health",
         "responses": {
           "200": {
@@ -31,9 +29,7 @@
     },
     "/ngram": {
       "get": {
-        "tags": [
-          "crate"
-        ],
+        "tags": [],
         "operationId": "ngram",
         "parameters": [
           {
@@ -51,8 +47,10 @@
             "description": "Start date (YYYY-MM-DD). Default: 2011-01-01",
             "required": false,
             "schema": {
-              "type": "string",
-              "nullable": true
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -61,8 +59,10 @@
             "description": "End date (YYYY-MM-DD). Default: today",
             "required": false,
             "schema": {
-              "type": "string",
-              "nullable": true
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -71,8 +71,10 @@
             "description": "Time granularity: day, week, month, year. Default: month",
             "required": false,
             "schema": {
-              "type": "string",
-              "nullable": true
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -152,12 +154,26 @@
         "type": "object",
         "required": [
           "t",
-          "v"
+          "v",
+          "count",
+          "total"
         ],
         "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Raw occurrence count for this phrase in this bucket",
+            "minimum": 0
+          },
           "t": {
             "type": "string",
             "description": "Bucket timestamp (YYYY-MM-DD)"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total n-grams of this order in this bucket",
+            "minimum": 0
           },
           "v": {
             "type": "number",
@@ -197,23 +213,29 @@
         ],
         "properties": {
           "end": {
-            "type": "string",
-            "description": "End date (YYYY-MM-DD). Default: today",
-            "nullable": true
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "End date (YYYY-MM-DD). Default: today"
           },
           "granularity": {
-            "type": "string",
-            "description": "Time granularity: day, week, month, year. Default: month",
-            "nullable": true
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Time granularity: day, week, month, year. Default: month"
           },
           "phrase": {
             "type": "string",
             "description": "Single phrase to query"
           },
           "start": {
-            "type": "string",
-            "description": "Start date (YYYY-MM-DD). Default: 2011-01-01",
-            "nullable": true
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Start date (YYYY-MM-DD). Default: 2011-01-01"
           }
         }
       },
@@ -224,9 +246,16 @@
           "normalized",
           "status",
           "points",
+          "global_count",
           "meta"
         ],
         "properties": {
+          "global_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total occurrences of this phrase across all time",
+            "minimum": 0
+          },
           "meta": {
             "$ref": "#/components/schemas/QueryMeta"
           },
@@ -246,7 +275,8 @@
             "description": "Sparse data points (only non-zero buckets). Client handles zero-fill."
           },
           "status": {
-            "$ref": "#/components/schemas/SeriesStatus"
+            "$ref": "#/components/schemas/SeriesStatus",
+            "description": "Status of this phrase"
           }
         }
       },

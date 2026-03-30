@@ -72,8 +72,8 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         <Select
           label="Granularity"
           data={[
-            { value: 'day', label: 'Day' },
-            { value: 'week', label: 'Week' },
+            // { value: 'day', label: 'Day' },
+            // { value: 'week', label: 'Week' },
             { value: 'month', label: 'Month' },
             { value: 'year', label: 'Year' },
           ]}
@@ -82,7 +82,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
           allowDeselect={false}
         />
       </Group>
-      <Group align="end">
+      <Group align="center" pb={12}>
         <div style={{ flex: 1 }}>
           <Slider
             label={v => `Smoothing: ${v}`}

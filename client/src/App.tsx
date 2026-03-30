@@ -56,6 +56,7 @@ export default function App() {
       series.push({
         label: state.phrases[i],
         points: smoothed,
+        globalCount: data.global_count,
       });
     }
 

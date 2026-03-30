@@ -119,6 +119,8 @@ pub struct QueryResponse {
     status: SeriesStatus,
     /// Sparse data points (only non-zero buckets). Client handles zero-fill.
     points: Vec<Point>,
+    /// Total occurrences of this phrase across all time
+    global_count: u64,
     meta: QueryMeta,
 }
 
@@ -147,6 +149,10 @@ pub struct Point {
     t: String,
     /// Relative frequency (count / total_count)
     v: f64,
+    /// Raw occurrence count for this phrase in this bucket
+    count: u64,
+    /// Total n-grams of this order in this bucket
+    total: u64,
 }
 
 // ============================================================================
@@ -313,6 +319,7 @@ pub async fn ngram(
                     normalized,
                     status: SeriesStatus::Invalid,
                     points: vec![],
+                    global_count: 0,
                     meta,
                 }),
             )
@@ -333,6 +340,8 @@ pub async fn ngram(
                             Some(Point {
                                 t: format_date(r.bucket),
                                 v: r.count as f64 / r.total_count as f64,
+                                count: r.count as u64,
+                                total: r.total_count,
                             })
                         } else {
                             None
@@ -351,6 +360,8 @@ pub async fn ngram(
                             Some(Point {
                                 t: format_date(r.bucket),
                                 v: r.sum_count as f64 / r.sum_total as f64,
+                                count: r.sum_count,
+                                total: r.sum_total,
                             })
                         } else {
                             None
@@ -359,6 +370,13 @@ pub async fn ngram(
                     .collect::<Vec<Point>>()
             }),
     };
+
+    // Fetch global count for this phrase
+    let global_count = state
+        .clickhouse
+        .get_global_count(n, &normalized)
+        .await
+        .unwrap_or(0);
 
     match query_result {
         Ok(points) if points.is_empty() => {
@@ -380,6 +398,7 @@ pub async fn ngram(
                     normalized,
                     status,
                     points: vec![],
+                    global_count,
                     meta,
                 }),
             )
@@ -393,6 +412,7 @@ pub async fn ngram(
                 normalized,
                 status: SeriesStatus::Indexed,
                 points,
+                global_count,
                 meta,
             }),
         )

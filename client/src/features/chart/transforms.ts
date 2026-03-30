@@ -22,9 +22,9 @@ export function fillMissingBuckets(
   granularity: Granularity,
 ): Point[] {
   // Build lookup from sparse data
-  const lookup = new Map<string, number>();
+  const lookup = new Map<string, Point>();
   for (const p of points) {
-    lookup.set(p.t, p.v);
+    lookup.set(p.t, p);
   }
 
   const result: Point[] = [];
@@ -33,7 +33,8 @@ export function fillMissingBuckets(
 
   while (current.isBefore(endDate) || current.isSame(endDate, 'day')) {
     const key = current.format('YYYY-MM-DD');
-    result.push({ t: key, v: lookup.get(key) ?? 0 });
+    const existing = lookup.get(key);
+    result.push(existing ?? { t: key, v: 0, count: 0, total: 0 });
     current = advanceBucket(current, granularity);
   }
 
@@ -72,7 +73,7 @@ export function applySmoothing(points: Point[], window: number): Point[] {
     const end = Math.min(points.length, i + Math.ceil(window / 2));
     const slice = points.slice(start, end);
     const avg = slice.reduce((sum, p) => sum + p.v, 0) / slice.length;
-    return { t: point.t, v: avg };
+    return { t: point.t, v: avg, count: point.count, total: point.total };
   });
 }
 
@@ -83,6 +84,7 @@ export function applySmoothing(points: Point[], window: number): Point[] {
 export interface ChartSeries {
   label: string;
   points: Point[];
+  globalCount: number;
 }
 
 const COLORS = [
@@ -97,11 +99,31 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
   return {
     tooltip: {
       trigger: 'axis',
-      valueFormatter: (value) => formatFrequency(value as number),
+      formatter: (params: unknown) => {
+        const items = params as Array<{
+          seriesName: string;
+          color: string;
+          data: [string, number, number, number];
+        }>;
+        if (!items?.length) return '';
+        const date = items[0].data[0];
+        const lines = items.map(item => {
+          const [, v, count, total] = item.data;
+          const freq = formatFrequency(v);
+          const counts = count > 0 || total > 0 ? ` <span style="color:#999">(${formatCount(count)} / ${formatCount(total)})</span>` : '';
+          return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${item.color};margin-right:4px;"></span>${item.seriesName}: ${freq}${counts}`;
+        });
+        return `<strong>${date}</strong><br/>${lines.join('<br/>')}`;
+      },
     },
     legend: {
-      show: series.length > 1,
+      show: true,
       bottom: 0,
+      formatter: (name: string) => {
+        const s = series.find(s => s.label === name);
+        if (s && s.globalCount > 0) return `${name} (${formatCount(s.globalCount)} total)`;
+        return name;
+      },
     },
     grid: {
       containLabel: true,
@@ -124,9 +146,15 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
       name: s.label,
       type: 'line' as const,
       showSymbol: false,
-      data: s.points.map(p => [p.t, p.v]),
+      data: s.points.map(p => [p.t, p.v, p.count, p.total]),
     })),
   };
+}
+
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
 }
 
 function formatFrequency(v: number): string {

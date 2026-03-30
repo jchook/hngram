@@ -2,3 +2,6 @@ node_modules/
 dist/
 .rsbuild/
 *.log
+
+# Generated API SDK (Kubb)
+src/gen/
