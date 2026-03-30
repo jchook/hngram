@@ -86,7 +86,7 @@ export default function App() {
 
         <QueryStatus phrases={state.phrases} results={results as never[]} />
 
-        <Paper p="md" withBorder>
+        <Paper p="md" withBorder style={{ aspectRatio: '2 / 1' }}>
           {hasData ? (
             <TimeSeriesChart option={chartOption} loading={isLoading} />
           ) : allDone && state.phrases.length > 0 ? (

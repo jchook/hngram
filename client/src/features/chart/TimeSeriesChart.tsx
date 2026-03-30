@@ -9,13 +9,13 @@ interface TimeSeriesChartProps {
 
 export function TimeSeriesChart({ option, loading }: TimeSeriesChartProps) {
   if (loading) {
-    return <Skeleton height={400} />;
+    return <Skeleton height="100%" />;
   }
 
   return (
     <ReactECharts
       option={option}
-      style={{ height: 400 }}
+      style={{ height: '100%', width: '100%' }}
       notMerge
     />
   );

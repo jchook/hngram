@@ -104,10 +104,7 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
       bottom: 0,
     },
     grid: {
-      left: 80,
-      right: 20,
-      top: 20,
-      bottom: series.length > 1 ? 40 : 10,
+      containLabel: true,
     },
     xAxis: {
       type: 'time',
@@ -120,7 +117,7 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
     },
     dataZoom: [
       { type: 'inside' },
-      { type: 'slider', height: 20, bottom: series.length > 1 ? 30 : 0 },
+      { type: 'slider' },
     ],
     color: COLORS,
     series: series.map((s) => ({
