@@ -16,10 +16,28 @@
 //! Precedence: CLI arg > TOML file > hardcoded default.
 
 use anyhow::Context;
+use clap::ValueEnum;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use tokenizer::counter::PruningConfig;
+
+// ============================================================================
+// Shared types
+// ============================================================================
+
+/// Bucket granularity for n-gram counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum BucketGranularity {
+    /// Daily buckets: YYYY-MM-DD (finest resolution, largest output)
+    #[default]
+    Daily,
+    /// Monthly buckets: YYYY-MM-01 (12x fewer buckets than daily)
+    Monthly,
+    /// Yearly buckets: YYYY-01-01 (365x fewer buckets than daily)
+    Yearly,
+}
 
 // ============================================================================
 // TOML serde types
@@ -40,6 +58,7 @@ pub struct ProcessSection {
     pub max_entries: Option<usize>,
     pub producer_count: Option<usize>,
     pub merge_shards: Option<usize>,
+    pub bucket_granularity: Option<BucketGranularity>,
     pub prune: Option<HashMap<String, PruneThreshold>>,
 }
 

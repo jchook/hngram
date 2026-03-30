@@ -64,18 +64,36 @@ The HN dataset is archived and immutable. Timestamps are monotonic. Data is neve
 
 ---
 
-## K-way sorted merge for global count aggregation
+## Sharded binary merge for count aggregation
 
-The ingestion pipeline's vocabulary build (pass 1) processes ~244 monthly Parquet files and needs to compute total counts for every unique n-gram across the entire corpus. The naive approach — merge all partial count files into one big HashMap — requires holding every unique (n, ngram) pair in memory. With ~50-100M unique trigrams at ~50 bytes each, that's 5-8 GB just for the HashMap.
+The ingestion pipeline accumulates n-gram counts in memory and periodically flushes them to partial files. These partials must later be merged (summing counts for the same key across flushes) to produce the final output.
 
-Instead, partial count files are written sorted by (n, ngram), then merged using a k-way sorted merge with a BinaryHeap. This streams through all files simultaneously, yielding one unique (n, ngram, total_count) at a time. Memory during merge is O(num_files) — one buffered line per open file (~244 entries in the heap). The merged stream feeds directly into vocabulary admission decisions and writes `global_counts.parquet` incrementally, so the full global counts map never materializes in memory.
+The original approach used sorted TSV files with a single-threaded k-way heap merge. This was correct but slow: ~100GB of partial data on a 32-core machine used only 1 core, and TSV parsing added overhead.
 
-Alternatives considered:
-- **RocksDB merge operator**: Good fit for incremental accumulation, but adds a heavy dependency for a one-time bootstrap step. RocksDB's merge operator is designed for exactly this kind of associative aggregation, but the external sort approach achieves the same result with zero dependencies.
-- **In-memory HashMap**: Simpler code but 5-8 GB peak memory for the full corpus. Unacceptable on the target VPS and uncomfortable even on a workstation.
-- **SQLite**: Simpler operationally but slower for bulk write-heavy aggregation. Would need batched UPSERTs in large transactions.
+The current approach uses **sharded binary partials**. At flush time, each entry is routed to shard `hash(key) % N` and written in a compact binary format (length-prefixed strings + fixed-width integers). At merge time, each shard is processed independently in parallel via rayon — read all files for that shard into a HashMap and sum counts. Since shards are disjoint by key, no cross-shard coordination is needed.
 
-The k-way merge is the right tool because n-gram counting is fundamentally a bulk aggregation problem, not an online KV problem. Sequential I/O + sorted merge is both faster and more memory-efficient than random-access hash table operations.
+Additionally, only one partial file type (counts) is written. Globals (corpus-wide totals per n-gram) and bucket totals (denominators) are derived from counts during the merge phase, since the sharded approach holds each shard in memory anyway. This eliminated 2 of the original 3 partial file types.
+
+The key insight enabling parallelism is that the merged output does not need to be sorted — it feeds into HashMap-based vocabulary building and Parquet writers that accept entries in any order. The original k-way merge was single-threaded precisely because it maintained sorted order; dropping that requirement unlocked embarrassingly parallel merging.
+
+Correctness depends on deterministic hash-based sharding: `hash(NgramKey) % N` routes every occurrence of a given n-gram to the same shard number, regardless of which flush produced it. This guarantees that summing counts within a shard produces the correct global total for every key — no entries are split across shards.
+
+Key properties:
+- **N-way parallelism** during merge (default N = CPU count)
+- **Binary format** avoids TSV parsing overhead
+- **Deterministic hash sharding** ensures all occurrences of a key land in the same shard
+- **Unsorted output** is what enables parallel independent processing per shard
+- **Single file type** simplifies the pipeline and reduces I/O by ~60%
+
+---
+
+## ClickHouse client uses HTTP, not native protocol
+
+The `clickhouse` Rust crate communicates over ClickHouse's HTTP interface (port 8123), not the native TCP protocol (port 9000). The native protocol is faster (binary framing, no HTTP overhead, supports multi-statement), but the only mature Rust crate for it (`clickhouse-rs`) is less actively maintained.
+
+One consequence: the HTTP API only accepts a single SQL statement per request. Multi-statement operations (like re-running a schema file) require splitting on `;` and sending each statement individually. The `reset-db` command handles this by stripping comments and splitting the schema SQL before executing.
+
+For bulk data import, we bypass the `clickhouse` crate entirely and POST Parquet files directly to the HTTP API (`INSERT INTO table FORMAT Parquet`). ClickHouse's native Parquet reader handles deserialization server-side, avoiding the overhead of Rust → RowBinary serialization. Large files are chunked into batches (read with Arrow, re-encoded as small Parquet buffers) to bound ClickHouse's memory usage during import.
 
 ---
 

@@ -35,6 +35,17 @@ output = "parquet"
 # file handles. Default: number of CPU cores.
 # merge_shards = 32
 
+# Bucket granularity: "daily" (default), "monthly", or "yearly".
+# Controls the time resolution of stored n-gram counts.
+#   daily   — one bucket per day (finest resolution, largest output)
+#   monthly — one bucket per month (~12x fewer entries than daily)
+#   yearly  — one bucket per year (~365x fewer entries than daily)
+# Coarser granularity dramatically reduces processing time and output size,
+# but the API cannot drill down finer than what was stored. The API already
+# aggregates at query time, so monthly storage still serves monthly/yearly
+# queries correctly — you just lose daily and weekly resolution.
+# bucket_granularity = "daily"
+
 # Pruning thresholds — per n-gram order (1=unigram, 2=bigram, 3=trigram).
 #
 # Three levels of filtering, applied at different pipeline stages:

@@ -20,3 +20,9 @@ test:
 
 openapi:
   cargo run -p api --bin generate_openapi > openapi.json
+
+reset-db:
+  cargo run -p ingestion -- reset-db
+
+reset:
+  cargo run -p ingestion -- reset

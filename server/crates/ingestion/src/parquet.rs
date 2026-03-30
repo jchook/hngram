@@ -1,5 +1,6 @@
 //! Parquet reading, row filtering, and parallel processing (RFC-004 §2, §6).
 
+use crate::config::BucketGranularity;
 use anyhow::Context;
 use arrow::array::{
     Array, Int8Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray, UInt8Array,
@@ -10,7 +11,7 @@ use tokenizer::counter::NgramCounter;
 
 /// A filtered HN comment ready for tokenization.
 pub struct Comment {
-    /// Daily bucket in "YYYY-MM-DD" format (UTC).
+    /// Bucket in "YYYY-MM-DD" format (UTC), granularity depends on config.
     pub bucket: String,
     /// Raw HTML text of the comment.
     pub text: String,
@@ -22,7 +23,7 @@ pub struct Comment {
 ///
 /// Filters: type=2 (comment), deleted=0, dead=0, text not null, time > min_ts.
 /// Extracts bucket as UTC date from the `time` column.
-pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comment>> {
+pub fn read_comments_after(path: &Path, min_ts: i64, granularity: BucketGranularity) -> anyhow::Result<Vec<Comment>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
 
@@ -35,31 +36,46 @@ pub fn read_comments_after(path: &Path, min_ts: i64) -> anyhow::Result<Vec<Comme
 
     for batch_result in reader {
         let batch = batch_result?;
-        comments.extend(extract_comments_from_batch(&batch, min_ts)?);
+        comments.extend(extract_comments_from_batch(&batch, min_ts, granularity)?);
     }
 
     Ok(comments)
 }
 
-/// Convert milliseconds since epoch to "YYYY-MM-DD" string in UTC.
-fn millis_to_date_string(ms: i64) -> Option<String> {
+/// Convert milliseconds since epoch to a bucket date string in UTC.
+/// Granularity controls the resolution:
+///   Daily:   "YYYY-MM-DD"
+///   Monthly: "YYYY-MM-01"
+///   Yearly:  "YYYY-01-01"
+fn millis_to_date_string(ms: i64, granularity: BucketGranularity) -> Option<String> {
     let secs = ms / 1000;
     let nanos = ((ms % 1000) * 1_000_000) as i128;
     let total_nanos = (secs as i128) * 1_000_000_000 + nanos;
     let dt = time::OffsetDateTime::from_unix_timestamp_nanos(total_nanos).ok()?;
     let date = dt.date();
-    Some(format!(
-        "{}-{:02}-{:02}",
-        date.year(),
-        date.month() as u8,
-        date.day()
-    ))
+    match granularity {
+        BucketGranularity::Daily => Some(format!(
+            "{}-{:02}-{:02}",
+            date.year(),
+            date.month() as u8,
+            date.day()
+        )),
+        BucketGranularity::Monthly => Some(format!(
+            "{}-{:02}-01",
+            date.year(),
+            date.month() as u8,
+        )),
+        BucketGranularity::Yearly => Some(format!(
+            "{}-01-01",
+            date.year(),
+        )),
+    }
 }
 
 /// Stream NgramCounter data from a Parquet file, one batch at a time.
 /// Calls `on_batch` with each batch's NgramCounter (per-bucket counts + totals).
 /// Memory per batch: one NgramCounter for ~8192 rows (a few MB).
-pub fn stream_counters<F>(path: &Path, min_ts: i64, mut on_batch: F) -> anyhow::Result<()>
+pub fn stream_counters<F>(path: &Path, min_ts: i64, granularity: BucketGranularity, mut on_batch: F) -> anyhow::Result<()>
 where
     F: FnMut(NgramCounter) -> anyhow::Result<()>,
 {
@@ -74,7 +90,7 @@ where
 
     for batch_result in reader {
         let batch = batch_result?;
-        let comments = extract_comments_from_batch(&batch, min_ts)?;
+        let comments = extract_comments_from_batch(&batch, min_ts, granularity)?;
         if comments.is_empty() {
             continue;
         }
@@ -90,6 +106,7 @@ where
 fn extract_comments_from_batch(
     batch: &arrow::record_batch::RecordBatch,
     min_ts: i64,
+    granularity: BucketGranularity,
 ) -> anyhow::Result<Vec<Comment>> {
     let num_rows = batch.num_rows();
 
@@ -156,7 +173,7 @@ fn extract_comments_from_batch(
         if ts_ms <= min_ts {
             continue;
         }
-        let bucket = match millis_to_date_string(ts_ms) {
+        let bucket = match millis_to_date_string(ts_ms, granularity) {
             Some(s) => s,
             None => continue,
         };
@@ -198,17 +215,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_millis_to_date() {
+    fn test_millis_to_date_daily() {
         // 2024-01-15 12:30:00 UTC = 1705318200000 ms
         assert_eq!(
-            millis_to_date_string(1705318200000),
+            millis_to_date_string(1705318200000, BucketGranularity::Daily),
             Some("2024-01-15".to_string())
         );
     }
 
     #[test]
+    fn test_millis_to_date_monthly() {
+        assert_eq!(
+            millis_to_date_string(1705318200000, BucketGranularity::Monthly),
+            Some("2024-01-01".to_string())
+        );
+    }
+
+    #[test]
+    fn test_millis_to_date_yearly() {
+        assert_eq!(
+            millis_to_date_string(1705318200000, BucketGranularity::Yearly),
+            Some("2024-01-01".to_string())
+        );
+    }
+
+    #[test]
     fn test_millis_epoch() {
-        assert_eq!(millis_to_date_string(0), Some("1970-01-01".to_string()));
+        assert_eq!(millis_to_date_string(0, BucketGranularity::Daily), Some("1970-01-01".to_string()));
     }
 
     #[test]
@@ -216,8 +249,12 @@ mod tests {
         // 2006-10-09 = first HN items
         // 1160352000000 ms
         assert_eq!(
-            millis_to_date_string(1160352000000),
+            millis_to_date_string(1160352000000, BucketGranularity::Daily),
             Some("2006-10-09".to_string())
+        );
+        assert_eq!(
+            millis_to_date_string(1160352000000, BucketGranularity::Monthly),
+            Some("2006-10-01".to_string())
         );
     }
 }

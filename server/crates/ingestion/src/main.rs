@@ -67,6 +67,9 @@ enum Command {
         /// Number of shards for parallel merge (overrides config file)
         #[arg(long)]
         merge_shards: Option<usize>,
+        /// Bucket granularity: daily, monthly, yearly (overrides config file)
+        #[arg(long)]
+        bucket_granularity: Option<config::BucketGranularity>,
         /// Path to TOML config file
         #[arg(long)]
         config: Option<PathBuf>,
@@ -75,6 +78,16 @@ enum Command {
     /// Load Parquet output into ClickHouse with atomic table swap
     Import {
         /// Directory containing output/ folder
+        #[arg(long, default_value = "./data/hn")]
+        data_dir: PathBuf,
+    },
+
+    /// Drop and recreate all ClickHouse tables
+    ResetDb,
+
+    /// Full reset: drop/recreate tables + delete output/ and partial/ dirs
+    Reset {
+        /// Directory with downloaded Parquet files
         #[arg(long, default_value = "./data/hn")]
         data_dir: PathBuf,
     },
@@ -136,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
             max_entries,
             producer_count,
             merge_shards,
+            bucket_granularity,
             config,
         } => {
             // Load TOML config file if provided
@@ -199,6 +213,9 @@ async fn main() -> anyhow::Result<()> {
                 merge_shards: merge_shards
                     .or(toml_process.merge_shards)
                     .unwrap_or(defaults.merge_shards),
+                bucket_granularity: bucket_granularity
+                    .or(toml_process.bucket_granularity)
+                    .unwrap_or(defaults.bucket_granularity),
                 prune: toml_process.prune,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)
@@ -212,7 +229,74 @@ async fn main() -> anyhow::Result<()> {
                 .context("Cannot connect to ClickHouse — is it running?")?;
             import::import(&data_dir, &ch).await?;
         }
+
+        Command::ResetDb => {
+            let ch = HnClickHouse::from_env();
+            ch.ping()
+                .await
+                .context("Cannot connect to ClickHouse — is it running?")?;
+            reset_db(&ch).await?;
+        }
+
+        Command::Reset { data_dir } => {
+            let ch = HnClickHouse::from_env();
+            ch.ping()
+                .await
+                .context("Cannot connect to ClickHouse — is it running?")?;
+            reset_db(&ch).await?;
+
+            let output_dir = data_dir.join("output");
+            if output_dir.exists() {
+                tracing::info!("Removing {}", output_dir.display());
+                std::fs::remove_dir_all(&output_dir)?;
+            }
+            let partial_dir = data_dir.join("partial");
+            if partial_dir.exists() {
+                tracing::info!("Removing {}", partial_dir.display());
+                std::fs::remove_dir_all(&partial_dir)?;
+            }
+            tracing::info!("Full reset complete");
+        }
     }
 
+    Ok(())
+}
+
+use hn_clickhouse::{
+    TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_INGESTION_LOG, TABLE_NGRAM_COUNTS,
+    TABLE_NGRAM_VOCABULARY,
+};
+
+const ALL_TABLES: [&str; 5] = [
+    TABLE_NGRAM_COUNTS,
+    TABLE_BUCKET_TOTALS,
+    TABLE_NGRAM_VOCABULARY,
+    TABLE_GLOBAL_COUNTS,
+    TABLE_INGESTION_LOG,
+];
+
+async fn reset_db(ch: &HnClickHouse) -> anyhow::Result<()> {
+    for table in &ALL_TABLES {
+        tracing::info!("Dropping {}", table);
+        ch.execute_sql(&format!("DROP TABLE IF EXISTS {}", table)).await?;
+    }
+    tracing::info!("Recreating schema...");
+    // Re-run schema DDL statements individually.
+    // Strip SQL comments before splitting on ';' so that comment blocks
+    // preceding a statement don't cause the whole chunk to be skipped.
+    let schema = include_str!("../../../etc/clickhouse/init/001-schema.sql");
+    let stripped: String = schema
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stmt in stripped.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        ch.execute_sql(stmt).await?;
+    }
+    tracing::info!("Database reset complete");
     Ok(())
 }
