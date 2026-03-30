@@ -2,7 +2,7 @@
 # smaller-than-prod dataset that's faster to iterate on while still
 # containing enough data to test queries and the frontend meaningfully.
 #
-# Usage: cargo run -p ingestion -- process --config ingestion.dev.toml
+# Usage: cargo run -p ingest -- process --config ingest.dev.toml
 
 [process]
 output = "parquet"

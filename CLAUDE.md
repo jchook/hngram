@@ -11,7 +11,7 @@ server/                     # Rust workspace
 ├── crates/
 │   ├── api/                # HTTP API server (axum + utoipa)
 │   ├── clickhouse/         # ClickHouse client (hn-clickhouse crate)
-│   ├── ingestion/          # Data pipeline CLI
+│   ├── ingest/             # Data pipeline CLI
 │   └── tokenizer/          # Tokenization + n-gram counting
 ├── etc/
 │   ├── caddy/              # Reverse proxy (prod)
@@ -53,25 +53,25 @@ cd client && just gen
 
 The `generate_openapi` binary lives at `server/crates/api/src/bin/generate_openapi.rs` and imports `ApiDoc` from the api crate's lib.
 
-### Ingestion pipeline
+### Ingest pipeline
 
 Three subcommands: download raw data, process it, and (for bootstrap) import into ClickHouse.
 
 ```bash
 cd server
 # Bootstrap (on local workstation, no ClickHouse needed):
-cargo run -p ingestion -- download                                        # Fetch Parquet from HuggingFace
-cargo run -p ingestion -- process --output parquet                        # Full corpus → output/*.parquet
+cargo run -p ingest -- download                                        # Fetch Parquet from HuggingFace
+cargo run -p ingest -- process --output parquet                        # Full corpus → output/*.parquet
 # Transfer output/ to prod, then:
-cargo run -p ingestion -- import                                          # Load parquet → staging → atomic swap
+cargo run -p ingest -- import                                          # Load parquet → staging → atomic swap
 
 # Incremental (on prod VPS, direct to ClickHouse):
-cargo run -p ingestion -- download --start 2026-03 --end 2026-03          # Fetch latest month
-cargo run -p ingestion -- process --start 2026-03 --end 2026-03           # Process new comments
+cargo run -p ingest -- download --start 2026-03 --end 2026-03          # Fetch latest month
+cargo run -p ingest -- process --start 2026-03 --end 2026-03           # Process new comments
 # Use --start/--end to scope to a subset of months
 ```
 
-`process --output parquet` runs the full corpus from scratch (two-pass: build vocabulary, then filter and write). `process --output clickhouse` (default) is incremental — reads watermark from `ingestion_log` table, processes only new comments, inserts directly.
+`process --output parquet` runs the full corpus from scratch (two-pass: build vocabulary, then filter and write). `process --output clickhouse` (default) is incremental — reads watermark from `ingest_log` table, processes only new comments, inserts directly.
 
 All state on prod lives in ClickHouse (no local manifest files). Data is append-only — vocabulary and counts only grow. Eventual consistency via ReplacingMergeTree is acceptable everywhere.
 
@@ -133,7 +133,7 @@ Prod is a standalone compose file with its own ClickHouse config (`config.prod.x
 |-------|---------|
 | `tokenizer` | Tokenization rules (RFC-001), n-gram counting/pruning (RFC-002) |
 | `hn-clickhouse` | Schema types, insert/query functions (RFC-003) |
-| `ingestion` | HuggingFace → tokenize → ClickHouse pipeline (RFC-004) |
+| `ingest` | HuggingFace → tokenize → ClickHouse pipeline (RFC-004) |
 | `api` | HTTP endpoints, OpenAPI spec (RFC-005) |
 
 ## Tokenizer Version
@@ -155,7 +155,7 @@ Defined in: `server/crates/tokenizer/src/lib.rs`
 | API types + handlers | `server/crates/api/src/lib.rs` |
 | API server startup | `server/crates/api/src/main.rs` |
 | OpenAPI generator | `server/crates/api/src/bin/generate_openapi.rs` |
-| Ingestion pipeline | `server/crates/ingestion/src/` |
+| Ingest pipeline | `server/crates/ingest/src/` |
 | Frontend app | `client/src/App.tsx` |
 | URL state management | `client/src/features/query/useQueryState.ts` |
 | Data transforms | `client/src/features/chart/transforms.ts` |

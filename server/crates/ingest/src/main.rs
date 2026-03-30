@@ -1,4 +1,4 @@
-//! HN N-gram ingestion pipeline (RFC-004)
+//! HN N-gram ingest pipeline (RFC-004)
 //!
 //! Subcommands:
 //!   download — fetch Parquet files from HuggingFace
@@ -23,7 +23,7 @@ use tokenizer::TOKENIZER_VERSION;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "ingestion", about = "HN N-gram ingestion pipeline (RFC-004)")]
+#[command(name = "ingest", about = "HN N-gram ingest pipeline (RFC-004)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    tracing::info!("HN N-gram ingestion pipeline");
+    tracing::info!("HN N-gram ingest pipeline");
     tracing::info!("Tokenizer version: {}", TOKENIZER_VERSION);
 
     match cli.command {
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!("Loaded config from {}", path.display());
                     cfg
                 }
-                None => config::IngestionConfig::default(),
+                None => config::IngestConfig::default(),
             };
             let toml_process = toml_config.process.unwrap_or_default();
 
@@ -263,7 +263,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 use hn_clickhouse::{
-    TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_INGESTION_LOG, TABLE_NGRAM_COUNTS,
+    TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_INGEST_LOG, TABLE_NGRAM_COUNTS,
     TABLE_NGRAM_VOCABULARY,
 };
 
@@ -272,7 +272,7 @@ const ALL_TABLES: [&str; 5] = [
     TABLE_BUCKET_TOTALS,
     TABLE_NGRAM_VOCABULARY,
     TABLE_GLOBAL_COUNTS,
-    TABLE_INGESTION_LOG,
+    TABLE_INGEST_LOG,
 ];
 
 async fn reset_db(ch: &HnClickHouse) -> anyhow::Result<()> {

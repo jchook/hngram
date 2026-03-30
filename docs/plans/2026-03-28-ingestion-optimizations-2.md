@@ -108,8 +108,8 @@ The admitted vocabulary is a `HashMap<(u8, String), ()>` loaded in memory during
 
 ## Verification
 
-1. `cargo check -p ingestion` — compiles
-2. `cargo test -p ingestion` — existing tests pass
+1. `cargo check -p ingest` — compiles
+2. `cargo test -p ingest` — existing tests pass
 3. Manual: `process --output parquet --start 2024-01 --end 2024-03` — produces output/ with 5 parquet files
 4. Manual: check partial/ has `.globals`, `.counts`, `.totals` files
 5. Manual: verify output counts match expected values for a known month

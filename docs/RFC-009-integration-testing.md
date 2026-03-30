@@ -4,12 +4,12 @@
 
 ## Problem
 
-Unit tests cover tokenization and counting logic, but there are no integration tests verifying the full path from ingestion through ClickHouse queries to API responses. Bugs like the `time::Date` bind serialization issue (dates sent as tuples instead of strings) can only be caught by hitting a real database.
+Unit tests cover tokenization and counting logic, but there are no integration tests verifying the full path from ingest through ClickHouse queries to API responses. Bugs like the `time::Date` bind serialization issue (dates sent as tuples instead of strings) can only be caught by hitting a real database.
 
 ## Goals
 
 - Catch schema/query mismatches before they reach production
-- Test the ingestion → query round-trip with real ClickHouse
+- Test the ingest → query round-trip with real ClickHouse
 - Keep unit tests fast and dependency-free
 - Integration tests should be easy to run locally and in CI
 
@@ -35,7 +35,7 @@ server/
 ├── tests/
 │   ├── common/
 │   │   └── mod.rs          # Test harness: create/drop DB, build client
-│   ├── ingestion_test.rs   # Ingest a small fixture, verify counts
+│   ├── ingest_test.rs   # Ingest a small fixture, verify counts
 │   └── api_test.rs         # Query endpoints against seeded data
 ```
 
@@ -105,4 +105,4 @@ A small synthetic fixture (10-20 comments across 2-3 days) is preferred over rea
 ## Open questions
 
 - Should API tests use `axum::test` (in-process) or spawn a real server and hit it with HTTP?
-- Do we need test coverage for the ingestion Parquet reading path, or is that sufficiently covered by the round-trip test with synthetic data?
+- Do we need test coverage for the ingest Parquet reading path, or is that sufficiently covered by the round-trip test with synthetic data?

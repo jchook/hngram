@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/jchook/hn-ngram"
 
-[profile.dev.package.ingestion]
+[profile.dev.package.ingest]
 opt-level = 2
 
 [profile.dev.package.tokenizer]

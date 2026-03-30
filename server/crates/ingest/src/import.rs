@@ -7,7 +7,7 @@
 use anyhow::{bail, Context};
 use arrow::array::{Array, Int64Array, StringArray, UInt64Array};
 use hn_clickhouse::{
-    HnClickHouse, IngestionLogRow, TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_NGRAM_COUNTS,
+    HnClickHouse, IngestLogRow, TABLE_BUCKET_TOTALS, TABLE_GLOBAL_COUNTS, TABLE_NGRAM_COUNTS,
     TABLE_NGRAM_VOCABULARY,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -35,7 +35,7 @@ pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
 
     // Validate all output files exist
-    let log_path = output_dir.join("ingestion_log.parquet");
+    let log_path = output_dir.join("ingest_log.parquet");
     for (file, _) in &FILE_TABLE_MAP {
         let path = output_dir.join(file);
         if !path.exists() {
@@ -78,10 +78,10 @@ pub async fn import(data_dir: &Path, ch: &HnClickHouse) -> anyhow::Result<()> {
         ch.drop_staging_table(table).await?;
     }
 
-    // Append ingestion_log entry (not swapped — preserves history)
-    tracing::info!("Loading ingestion_log.parquet...");
-    let log_row = read_ingestion_log(&log_path)?;
-    ch.insert_ingestion_log(&log_row).await?;
+    // Append ingest_log entry (not swapped — preserves history)
+    tracing::info!("Loading ingest_log.parquet...");
+    let log_row = read_ingest_log(&log_path)?;
+    ch.insert_ingest_log(&log_row).await?;
     tracing::info!(
         "  Watermark: {} | Duration: {:.1}s",
         log_row.last_ingested_ts,
@@ -195,10 +195,10 @@ async fn post_parquet_bytes(
 }
 
 // ============================================================================
-// Ingestion log reader (small file, still uses Arrow)
+// Ingest log reader (small file, still uses Arrow)
 // ============================================================================
 
-fn read_ingestion_log(path: &Path) -> anyhow::Result<IngestionLogRow> {
+fn read_ingest_log(path: &Path) -> anyhow::Result<IngestLogRow> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
@@ -250,7 +250,7 @@ fn read_ingestion_log(path: &Path) -> anyhow::Result<IngestionLogRow> {
             .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
             .context("Missing duration_ms")?;
 
-        return Ok(IngestionLogRow {
+        return Ok(IngestLogRow {
             tokenizer_version: tv.value(0).to_string(),
             command: cmd.value(0).to_string(),
             last_ingested_ts: ts.value(0),
@@ -264,5 +264,5 @@ fn read_ingestion_log(path: &Path) -> anyhow::Result<IngestionLogRow> {
         });
     }
 
-    bail!("ingestion_log.parquet is empty")
+    bail!("ingest_log.parquet is empty")
 }

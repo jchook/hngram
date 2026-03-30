@@ -1,4 +1,4 @@
-//! Sharded binary partial file I/O and parallel merge for ingestion.
+//! Sharded binary partial file I/O and parallel merge for ingest.
 //!
 //! During source processing, n-gram counts are flushed to sharded binary partial
 //! files. Each entry is routed to a shard by `hash(key) % num_shards`, guaranteeing

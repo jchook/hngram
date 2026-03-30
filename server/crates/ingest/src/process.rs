@@ -1,4 +1,4 @@
-//! Ingestion processing: tokenize, count, prune, and output (RFC-004 §12).
+//! Ingest processing: tokenize, count, prune, and output (RFC-004 §12).
 //!
 //! Two output modes:
 //! - ClickHouse: incremental, watermark-based, direct DB insertion
@@ -10,7 +10,7 @@ use crate::parquet;
 use crate::vocabulary;
 use anyhow::Context;
 use hn_clickhouse::{
-    BucketTotalRow, GlobalCountRow, HnClickHouse, IngestionLogRow, NgramCountRow,
+    BucketTotalRow, GlobalCountRow, HnClickHouse, IngestLogRow, NgramCountRow,
     NgramVocabularyRow,
 };
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ async fn process_clickhouse(
     // Guard: check for data from a different tokenizer version
     if let Some(other) = ch.check_other_tokenizer_versions().await? {
         anyhow::bail!(
-            "Database has ingestion data for tokenizer version '{}', but current version is '{}'. \
+            "Database has ingest data for tokenizer version '{}', but current version is '{}'. \
              A tokenizer change requires a full rebuild (process --output parquet + import).",
             other,
             tv
@@ -112,7 +112,7 @@ async fn process_clickhouse(
     let mut prev_vocab = ch.load_vocabulary().await.unwrap_or_default();
     tracing::info!("Current vocabulary: {} admitted n-grams", prev_vocab.len());
 
-    // Read watermark from ingestion_log
+    // Read watermark from ingest_log
     let watermark = ch.get_latest_watermark().await?.unwrap_or(0);
     let mut max_ts = watermark;
     let mut total_comments = 0u64;
@@ -280,7 +280,7 @@ async fn process_clickhouse(
         tracing::info!("Saved {} global count entries to ClickHouse (min_export={})", gc_rows.len(), min_gc_export);
 
         let duration = run_start.elapsed();
-        ch.insert_ingestion_log(&IngestionLogRow {
+        ch.insert_ingest_log(&IngestLogRow {
             tokenizer_version: tv,
             command: "process".to_string(),
             last_ingested_ts: max_ts,
@@ -673,7 +673,7 @@ async fn process_parquet(
     tracing::info!("Wrote {} bucket total rows to parquet", total_total_rows);
 
     // ================================================================
-    // Write vocabulary + ingestion_log parquet
+    // Write vocabulary + ingest_log parquet
     // ================================================================
 
     let now = time::OffsetDateTime::now_utc();
@@ -693,7 +693,7 @@ async fn process_parquet(
     tracing::info!("Wrote {} vocabulary rows", vocab_rows.len());
 
     let duration = run_start.elapsed();
-    let log_row = IngestionLogRow {
+    let log_row = IngestLogRow {
         tokenizer_version: tv,
         command: "process".to_string(),
         last_ingested_ts: max_ts,
@@ -706,8 +706,8 @@ async fn process_parquet(
         duration_ms: duration.as_millis() as u64,
     };
 
-    let log_path = output_dir.join("ingestion_log.parquet");
-    parquet_writer::write_ingestion_log_parquet(&log_path, &log_row)?;
+    let log_path = output_dir.join("ingest_log.parquet");
+    parquet_writer::write_ingest_log_parquet(&log_path, &log_row)?;
 
     tracing::info!(
         "Processing complete — {} count rows, {} total rows, {:.1}s",
@@ -988,9 +988,9 @@ mod parquet_writer {
         }
     }
 
-    pub fn write_ingestion_log_parquet(
+    pub fn write_ingest_log_parquet(
         path: &Path,
-        row: &IngestionLogRow,
+        row: &IngestLogRow,
     ) -> anyhow::Result<()> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("tokenizer_version", DataType::Utf8, false),

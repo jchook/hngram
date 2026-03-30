@@ -103,7 +103,7 @@ This app serves:
 * one lightweight API
 * one ClickHouse instance with precomputed aggregates
 
-The production server is **not** responsible for full historical ingestion.
+The production server is **not** responsible for full historical ingest.
 
 Current low-cost VPS pricing shows that:
 
@@ -250,7 +250,7 @@ Responsibilities:
 * return JSON responses
 * expose OpenAPI spec
 
-No background historical ingestion in this service.
+No background historical ingest in this service.
 
 ---
 
@@ -337,7 +337,7 @@ Preferred:
 
 ## Spec (mandatory)
 
-Historical ingestion happens **off-server** on local machine.
+Historical ingest happens **off-server** on local machine.
 
 Deployment flow:
 
@@ -654,7 +654,7 @@ Initial deployment may be **static** after initial import.
 
 If later enabling freshness:
 
-* run incremental ingestion off-box or on-box
+* run incremental ingest off-box or on-box
 * import only delta aggregates
 * avoid raw corpus retention on VPS
 

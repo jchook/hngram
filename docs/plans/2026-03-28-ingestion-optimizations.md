@@ -93,10 +93,10 @@ Add to the Process subcommand:
 
 | File | Change |
 |------|--------|
-| `server/crates/ingestion/src/process.rs` | Pass 1: producer-consumer with backpressure, cardinality-based flush |
-| `server/crates/ingestion/src/parquet.rs` | Add row-group-level iteration for streaming global counts |
-| `server/crates/ingestion/src/vocabulary.rs` | Glob-based file discovery for merge, remove month-based naming |
-| `server/crates/ingestion/src/main.rs` | Add `--max-ngrams` CLI arg, pass to process |
+| `server/crates/ingest/src/process.rs` | Pass 1: producer-consumer with backpressure, cardinality-based flush |
+| `server/crates/ingest/src/parquet.rs` | Add row-group-level iteration for streaming global counts |
+| `server/crates/ingest/src/vocabulary.rs` | Glob-based file discovery for merge, remove month-based naming |
+| `server/crates/ingest/src/main.rs` | Add `--max-ngrams` CLI arg, pass to process |
 
 ### Parquet reader changes (parquet.rs)
 
@@ -117,8 +117,8 @@ Option A is cleaner — the producer reads one row group, filters comments, toke
 
 ## Verification
 
-1. `cargo check -p ingestion` — compiles
-2. `cargo test -p ingestion` — existing tests pass
+1. `cargo check -p ingest` — compiles
+2. `cargo test -p ingest` — existing tests pass
 3. Manual: run `process --output parquet --start 2024-01 --end 2024-03` with default limit — check partial/ has fewer files than months
 4. Manual: run with `--max-ngrams 100000` — check it produces more partial files
 5. Check resume: kill mid-run, re-run — should detect incomplete partials and restart

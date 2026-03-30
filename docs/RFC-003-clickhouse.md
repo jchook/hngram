@@ -101,7 +101,7 @@ SETTINGS index_granularity = 8192;
 
 * `tokenizer_version`
 
-  * must match tokenizer used during ingestion
+  * must match tokenizer used during ingest
   * required for correctness across tokenizer changes
 
 * `n`
@@ -229,14 +229,14 @@ ORDER BY (tokenizer_version, n, ngram);
 ## Rationale
 
 * supports pruning logic (RFC-002)
-* separates ingestion concerns from serving layer
-* `ReplacingMergeTree` handles deduplication on re-ingestion (ClickHouse lacks `INSERT ... ON CONFLICT`)
+* separates ingest concerns from serving layer
+* `ReplacingMergeTree` handles deduplication on re-ingest (ClickHouse lacks `INSERT ... ON CONFLICT`)
 
 ---
 
 ## Flexibility
 
-* may be omitted if ingestion system manages vocabulary externally
+* may be omitted if ingest system manages vocabulary externally
 
 ---
 
@@ -352,7 +352,7 @@ Client computes `relative_frequency = count / total_count` using cached totals.
 
 ## Rationale
 
-* pre-aggregation moves complexity to ingestion
+* pre-aggregation moves complexity to ingest
 * queries remain simple and fast
 * separating totals eliminates JOIN overhead and enables aggressive caching
 
@@ -434,7 +434,7 @@ ORDER BY bucket;
 ## Flexibility
 
 * batch size may be tuned
-* ingestion concurrency may be tuned
+* ingest concurrency may be tuned
 
 ---
 
@@ -592,7 +592,7 @@ System is valid if:
 * queries return correct normalized values
 * performance meets latency targets
 * storage remains bounded
-* ingestion produces no duplicates
+* ingest produces no duplicates
 * schema aligns with query pattern
 
 ---
@@ -623,7 +623,7 @@ pub struct NgramVocabularyRow { tokenizer_version, n, ngram, global_count, admit
 ### Client wrapper
 ```rust
 pub struct HnClickHouse {
-    // Insert operations (for ingestion)
+    // Insert operations (for ingest)
     pub async fn insert_ngram_counts(&self, rows: &[NgramCountRow])
     pub async fn insert_bucket_totals(&self, rows: &[BucketTotalRow])
     pub async fn insert_vocabulary(&self, rows: &[NgramVocabularyRow])

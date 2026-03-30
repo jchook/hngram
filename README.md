@@ -16,7 +16,7 @@ Very rare phrases are pruned from the dataset. This is a tool for exploring tren
 
 ## Architecture
 
-- **Ingestion** (Rust) -- downloads Parquet data, tokenizes comments, counts n-grams, inserts into ClickHouse
+- **Ingest** (Rust) -- downloads Parquet data, tokenizes comments, counts n-grams, inserts into ClickHouse
 - **API** (Rust/Axum) -- serves n-gram frequency queries
 - **Frontend** (React/TypeScript) -- search UI with time series charts
 - **ClickHouse** -- stores all the counts

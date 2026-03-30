@@ -1,4 +1,4 @@
-//! TOML configuration for the ingestion pipeline.
+//! TOML configuration for the ingest pipeline.
 //!
 //! Config file structure is namespaced by subcommand:
 //!
@@ -45,7 +45,7 @@ pub enum BucketGranularity {
 
 /// Top-level config file, namespaced by subcommand.
 #[derive(Debug, Default, Deserialize)]
-pub struct IngestionConfig {
+pub struct IngestConfig {
     pub process: Option<ProcessSection>,
 }
 
@@ -74,11 +74,11 @@ pub struct PruneThreshold {
 // Loading
 // ============================================================================
 
-/// Parse an ingestion TOML config file.
-pub fn load(path: &Path) -> anyhow::Result<IngestionConfig> {
+/// Parse an ingest TOML config file.
+pub fn load(path: &Path) -> anyhow::Result<IngestConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file {}", path.display()))?;
-    let config: IngestionConfig = toml::from_str(&contents)
+    let config: IngestConfig = toml::from_str(&contents)
         .with_context(|| format!("Failed to parse config file {}", path.display()))?;
     Ok(config)
 }

@@ -59,13 +59,13 @@ Items 2-4 were superseded by item 7 (per-phrase caching strategy). Item 5 is ind
 
 ## Spec (mandatory)
 
-The underlying n-gram data is effectively immutable between ingestion runs. Caddy must cache API responses at the reverse proxy layer.
+The underlying n-gram data is effectively immutable between ingest runs. Caddy must cache API responses at the reverse proxy layer.
 
 ### Required headers (set by API or Caddy)
 
 ```text
 Cache-Control: public, max-age=3600
-ETag: "<last-ingestion-timestamp>"
+ETag: "<last-ingest-timestamp>"
 ```
 
 ### Caddy cache configuration
@@ -74,9 +74,9 @@ Enable response caching for `/query` endpoint. Repeated queries for the same phr
 
 ### Cache invalidation
 
-On ingestion completion:
+On ingest completion:
 
-* update the `ETag` / `Last-Modified` value (e.g. store last ingestion timestamp)
+* update the `ETag` / `Last-Modified` value (e.g. store last ingest timestamp)
 * Caddy cache expires naturally via `max-age`, or can be purged explicitly
 
 ---
@@ -84,7 +84,7 @@ On ingestion completion:
 ## Rationale
 
 * most queries will be for popular phrases that other users have already searched
-* data changes only on ingestion (daily at most, likely less frequent)
+* data changes only on ingest (daily at most, likely less frequent)
 * highest ROI optimization with near-zero implementation complexity
 
 ---
@@ -186,17 +186,17 @@ For unigrams (which have no pruning), the absence of data means the phrase was n
 
 ### Alternative: bloom filter
 
-Generate a compact bloom filter of the admitted vocabulary at ingestion time. Serve as a static file (`/vocabulary.bloom`). Client checks locally before displaying "not indexed" warnings — no round-trip needed.
+Generate a compact bloom filter of the admitted vocabulary at ingest time. Serve as a static file (`/vocabulary.bloom`). Client checks locally before displaying "not indexed" warnings — no round-trip needed.
 
 * bloom filter for ~1M admitted n-grams ≈ 1-2MB at 1% false positive rate
 * false positive = client thinks it's indexed but it isn't (harmless — query returns empty)
-* updated only on ingestion
+* updated only on ingest
 
 ---
 
 ## Rationale
 
-* vocabulary changes only on ingestion, making it highly cacheable
+* vocabulary changes only on ingest, making it highly cacheable
 * bloom filter approach eliminates the vocabulary DB query entirely
 * for most queries (popular phrases), vocabulary check is unnecessary overhead
 

@@ -1,13 +1,13 @@
-# Ingestion pipeline configuration for HN N-gram Viewer.
+# Ingest pipeline configuration for HN N-gram Viewer.
 #
 # Copy this file and customize for your environment:
-#   cp ingestion.example.toml ingestion.local.toml
-#   cargo run -p ingestion -- process --config ingestion.local.toml
+#   cp ingest.example.toml ingest.local.toml
+#   cargo run -p ingest -- process --config ingest.local.toml
 #
 # See also:
-#   ingestion.test.toml  — aggressive pruning for quick smoke tests
-#   ingestion.dev.toml   — moderate pruning for local development
-#   ingestion.prod.toml  — minimal pruning for production
+#   ingest.test.toml  — aggressive pruning for quick smoke tests
+#   ingest.dev.toml   — moderate pruning for local development
+#   ingest.prod.toml  — minimal pruning for production
 
 [process]
 

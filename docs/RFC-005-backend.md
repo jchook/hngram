@@ -282,7 +282,7 @@ Input: "this is a very long phrase"
 
 ## Constraints
 
-* must use same tokenizer version as ingestion (from `hn_clickhouse::TOKENIZER_VERSION`)
+* must use same tokenizer version as ingest (from `hn_clickhouse::TOKENIZER_VERSION`)
 
 ---
 
@@ -494,7 +494,7 @@ The `generate_openapi` binary imports the `ApiDoc` struct from `api::lib` and se
 
 ## Spec (mandatory)
 
-N-gram data is effectively immutable between ingestion runs. API responses must include `Cache-Control` headers.
+N-gram data is effectively immutable between ingest runs. API responses must include `Cache-Control` headers.
 
 ### Response headers
 
@@ -510,13 +510,13 @@ Caddy sets `Cache-Control: public, max-age=31536000, immutable` on JS/CSS/image/
 
 ### Cache invalidation
 
-Cache expires naturally via `max-age`. On ingestion, new data appears after TTL expiry. No explicit purge mechanism in v1.
+Cache expires naturally via `max-age`. On ingest, new data appears after TTL expiry. No explicit purge mechanism in v1.
 
 ---
 
 ## Rationale
 
-* data changes only on ingestion (daily at most)
+* data changes only on ingest (daily at most)
 * repeated queries for popular phrases are served from intermediary caches
 * per-phrase API design maximizes cache hit rates — each phrase × granularity × date range is independently cached, so adding a new phrase to a search reuses cached results for existing phrases
 * highest-ROI optimization with near-zero complexity
@@ -526,7 +526,7 @@ Cache expires naturally via `max-age`. On ingestion, new data appears after TTL 
 ## Flexibility
 
 * `max-age` may be increased for historical date ranges that can never change
-* may add `ETag` based on last ingestion timestamp in future
+* may add `ETag` based on last ingest timestamp in future
 
 ---
 

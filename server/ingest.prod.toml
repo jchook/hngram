@@ -1,7 +1,7 @@
 # Production config: low pruning thresholds to retain the broadest useful
 # vocabulary. Optimized for data quality over processing speed.
 #
-# Usage: cargo run -p ingestion -- process --config ingestion.prod.toml
+# Usage: cargo run -p ingest -- process --config ingest.prod.toml
 
 [process]
 output = "clickhouse"

@@ -32,7 +32,7 @@ Defaults: bigram global=20, trigram global=10, bigram bucket=3, trigram bucket=5
 
 ## Dev runs Rust locally, Docker only for ClickHouse
 
-In development, only ClickHouse runs in Docker (`docker compose up -d`). The API server and ingestion pipeline run as local `cargo run` processes via `process-compose` or `just`.
+In development, only ClickHouse runs in Docker (`docker compose up -d`). The API server and ingest pipeline run as local `cargo run` processes via `process-compose` or `just`.
 
 Local Rust builds are faster to iterate on, support debuggers, and avoid the Docker build cache invalidation dance. The `Dockerfile` and `docker-compose.prod.yml` exist for production deployment where everything runs in containers.
 
@@ -40,7 +40,7 @@ Local Rust builds are faster to iterate on, support debuggers, and avoid the Doc
 
 ## `.env` loaded via dotenvy in all Rust entry points
 
-Both the API server and ingestion CLI load `.env` via `dotenvy::dotenv().ok()` at startup. `cargo run` doesn't source `.env` files. The `.ok()` means missing `.env` is silently ignored (fine for prod/CI where env vars are set externally).
+Both the API server and ingest CLI load `.env` via `dotenvy::dotenv().ok()` at startup. `cargo run` doesn't source `.env` files. The `.ok()` means missing `.env` is silently ignored (fine for prod/CI where env vars are set externally).
 
 ---
 
@@ -56,9 +56,9 @@ The API accepts one phrase per request. The frontend makes parallel requests (on
 
 ---
 
-## Watermark-based incremental ingestion
+## Watermark-based incremental ingest
 
-The `process` command (ClickHouse mode) reads a watermark from the `ingestion_log` table: the timestamp of the newest comment processed. Each run reads parquet files and skips comments with `time <= watermark`, processing only new data. This supports any update cadence — daily, hourly, or monthly — with the same command. All state on prod lives in ClickHouse — no local manifest files.
+The `process` command (ClickHouse mode) reads a watermark from the `ingest_log` table: the timestamp of the newest comment processed. Each run reads parquet files and skips comments with `time <= watermark`, processing only new data. This supports any update cadence — daily, hourly, or monthly — with the same command. All state on prod lives in ClickHouse — no local manifest files.
 
 The HN dataset is archived and immutable. Timestamps are monotonic. Data is never corrected retroactively. These properties make a simple watermark sufficient — no checksums, row offsets, or dedup logic needed.
 
@@ -66,7 +66,7 @@ The HN dataset is archived and immutable. Timestamps are monotonic. Data is neve
 
 ## Sharded binary merge for count aggregation
 
-The ingestion pipeline accumulates n-gram counts in memory and periodically flushes them to partial files. These partials must later be merged (summing counts for the same key across flushes) to produce the final output.
+The ingest pipeline accumulates n-gram counts in memory and periodically flushes them to partial files. These partials must later be merged (summing counts for the same key across flushes) to produce the final output.
 
 The original approach used sorted TSV files with a single-threaded k-way heap merge. This was correct but slow: ~100GB of partial data on a 32-core machine used only 1 core, and TSV parsing added overhead.
 

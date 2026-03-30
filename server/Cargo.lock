@@ -1222,7 +1222,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ingestion"
+name = "ingest"
 version = "0.1.0"
 dependencies = [
  "anyhow",

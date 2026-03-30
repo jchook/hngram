@@ -31,7 +31,7 @@ PARTITION BY toYYYYMM(bucket)
 ORDER BY (tokenizer_version, n, bucket);
 
 -- N-gram vocabulary table for admission tracking
--- Uses ReplacingMergeTree to handle re-ingestion without duplicates
+-- Uses ReplacingMergeTree to handle re-ingest without duplicates
 -- (ClickHouse has no INSERT ... ON CONFLICT, so we rely on eventual dedup)
 CREATE TABLE IF NOT EXISTS hn_ngram.ngram_vocabulary
 (
@@ -45,7 +45,7 @@ ENGINE = ReplacingMergeTree(admitted_at)
 ORDER BY (tokenizer_version, n, ngram);
 
 -- Global n-gram counts for vocabulary admission decisions.
--- Tracks total corpus-wide count per (n, ngram) across all ingestion runs.
+-- Tracks total corpus-wide count per (n, ngram) across all ingest runs.
 -- ReplacingMergeTree keeps the highest count on dedup.
 CREATE TABLE IF NOT EXISTS hn_ngram.global_counts
 (
@@ -57,10 +57,10 @@ CREATE TABLE IF NOT EXISTS hn_ngram.global_counts
 ENGINE = ReplacingMergeTree(count)
 ORDER BY (tokenizer_version, n, ngram);
 
--- Ingestion log table
--- Append-only audit trail of ingestion runs. Tracks watermark for incremental processing.
+-- Ingest log table
+-- Append-only audit trail of ingest runs. Tracks watermark for incremental processing.
 -- UUIDv7 is time-sortable, so ORDER BY id DESC LIMIT 1 gives the latest entry.
-CREATE TABLE IF NOT EXISTS hn_ngram.ingestion_log
+CREATE TABLE IF NOT EXISTS hn_ngram.ingest_log
 (
     id UUID DEFAULT generateUUIDv7(),
     tokenizer_version LowCardinality(String),

@@ -1,6 +1,6 @@
 # RFC-004
 
-## Rust Ingestion + Processing Pipeline
+## Rust Ingest + Processing Pipeline
 
 ## Status
 
@@ -19,7 +19,7 @@ Define:
 * aggregation strategy with bounded memory
 * dual output: ClickHouse-ready Parquet files or direct DB insertion
 * import with atomic table swap
-* ingestion log for watermark tracking
+* ingest log for watermark tracking
 * idempotency guarantees
 * CLI interface
 * progress reporting
@@ -31,14 +31,14 @@ Define:
 Three subcommands handle the full lifecycle:
 
 ```text
-ingestion download   — fetch raw Parquet from HuggingFace
-ingestion process    — tokenize, count, prune → output parquet or direct to ClickHouse
-ingestion import     — load parquet into staging tables, atomic swap to live
+ingest download   — fetch raw Parquet from HuggingFace
+ingest process    — tokenize, count, prune → output parquet or direct to ClickHouse
+ingest import     — load parquet into staging tables, atomic swap to live
 ```
 
 ### Why two output modes?
 
-Processing the full corpus (~41M comments) is CPU- and disk-intensive. The prod environment is a small, inexpensive VPS that cannot handle this workload in reasonable time. We assume the developer has a local workstation that is significantly faster. The Parquet output mode exists to **bootstrap prod once**: process the full corpus locally, transfer the output files, and import them. After that, all ongoing ingestion happens directly on the VPS via ClickHouse mode — daily or monthly deltas are small enough to process on modest hardware.
+Processing the full corpus (~41M comments) is CPU- and disk-intensive. The prod environment is a small, inexpensive VPS that cannot handle this workload in reasonable time. We assume the developer has a local workstation that is significantly faster. The Parquet output mode exists to **bootstrap prod once**: process the full corpus locally, transfer the output files, and import them. After that, all ongoing ingest happens directly on the VPS via ClickHouse mode — daily or monthly deltas are small enough to process on modest hardware.
 
 ### Bootstrap (one-time, local workstation → prod)
 
@@ -57,7 +57,7 @@ download → process
 | | `--output parquet` | `--output clickhouse` (default) |
 |---|---|---|
 | **Vocabulary** | Built from scratch (two-pass) | Read from DB, expand with new admissions |
-| **Watermark source** | 0 (full corpus) | `ingestion_log` table |
+| **Watermark source** | 0 (full corpus) | `ingest_log` table |
 | **ClickHouse needed** | No | Yes |
 | **Use case** | One-time bootstrap | Ongoing incremental updates |
 
@@ -399,10 +399,10 @@ After processing all rows in a Parquet file:
   bucket_totals.parquet
   ngram_vocabulary.parquet
   global_counts.parquet
-  ingestion_log.parquet
+  ingest_log.parquet
 ```
 
-All output Parquet schemas match the ClickHouse table schemas exactly (see §9.3). This allows `import` to load every file uniformly. There is no separate manifest — the `ingestion_log.parquet` file contains a single row with the watermark, tokenizer version, processing stats, and duration.
+All output Parquet schemas match the ClickHouse table schemas exactly (see §9.3). This allows `import` to load every file uniformly. There is no separate manifest — the `ingest_log.parquet` file contains a single row with the watermark, tokenizer version, processing stats, and duration.
 
 ### Vocabulary strategy
 
@@ -431,7 +431,7 @@ After bootstrap via `import`, the VPS has the full `global_counts` table from th
 
 ### Watermark
 
-Read from the `ingestion_log` table (0 if no entries). Only comments with `time > watermark` are processed. After successful processing, a new `ingestion_log` entry is written.
+Read from the `ingest_log` table (0 if no entries). Only comments with `time > watermark` are processed. After successful processing, a new `ingest_log` entry is written.
 
 ## 9.3 ClickHouse Table Schemas
 
@@ -487,10 +487,10 @@ CREATE TABLE global_counts (
 ORDER BY (tokenizer_version, n, ngram);
 ```
 
-### `ingestion_log`
+### `ingest_log`
 
 ```sql
-CREATE TABLE ingestion_log (
+CREATE TABLE ingest_log (
     id UUID DEFAULT generateUUIDv7(),
     tokenizer_version LowCardinality(String),
     command LowCardinality(String),
@@ -507,10 +507,10 @@ CREATE TABLE ingestion_log (
 ORDER BY id;
 ```
 
-The `ingestion_log` is an append-only audit trail. Each `process` (ClickHouse mode) and `import` run appends one row. The watermark is read as:
+The `ingest_log` is an append-only audit trail. Each `process` (ClickHouse mode) and `import` run appends one row. The watermark is read as:
 
 ```sql
-SELECT last_ingested_ts FROM ingestion_log ORDER BY id DESC LIMIT 1
+SELECT last_ingested_ts FROM ingest_log ORDER BY id DESC LIMIT 1
 ```
 
 ---
@@ -519,7 +519,7 @@ SELECT last_ingested_ts FROM ingestion_log ORDER BY id DESC LIMIT 1
 
 * Parquet output decouples heavy processing from ClickHouse — no DB needed on the workstation
 * ClickHouse reads Parquet natively — no custom format or protocol
-* `ingestion_log` replaces the manifest for prod state — single source of truth in the DB
+* `ingest_log` replaces the manifest for prod state — single source of truth in the DB
 * UUIDv7 is time-sortable, so `ORDER BY id DESC LIMIT 1` always gives the latest entry
 * audit trail is free and useful for debugging
 
@@ -547,7 +547,7 @@ The `import` command loads Parquet output files into ClickHouse with an atomic t
    EXCHANGE TABLES global_counts AND global_counts_staging
    ```
 4. Drop the old tables (now named `_staging`)
-5. Load `ingestion_log.parquet` into the `ingestion_log` table (append, not swap — preserves audit history)
+5. Load `ingest_log.parquet` into the `ingest_log` table (append, not swap — preserves audit history)
 
 ### Consistency
 
@@ -555,7 +555,7 @@ The `import` command loads Parquet output files into ClickHouse with an atomic t
 
 ### After import
 
-Once `import` completes, incremental `process` runs on the VPS pick up from the watermark recorded in `ingestion_log`. Run `process` covering through the present day to fill any gap.
+Once `import` completes, incremental `process` runs on the VPS pick up from the watermark recorded in `ingest_log`. Run `process` covering through the present day to fill any gap.
 
 ---
 
@@ -563,7 +563,7 @@ Once `import` completes, incremental `process` runs on the VPS pick up from the 
 
 * atomic swap means zero downtime — the old data serves queries until the swap instant
 * staging tables prevent partial loads from being visible
-* `ingestion_log.parquet` is loaded like any other table — no special manifest parsing
+* `ingest_log.parquet` is loaded like any other table — no special manifest parsing
 * the log entry ensures subsequent `process` runs know where the bootstrap left off
 
 ---
@@ -580,7 +580,7 @@ no duplicate (tokenizer_version, n, ngram, bucket)
 
 ### ClickHouse mode
 
-Watermark from `ingestion_log` ensures only new comments are processed. Re-running is a no-op if no new comments exist.
+Watermark from `ingest_log` ensures only new comments are processed. Re-running is a no-op if no new comments exist.
 
 ### Parquet mode
 
@@ -590,11 +590,11 @@ Full corpus processing from timestamp 0. Output files are a complete, self-conta
 
 Pass 1 writes sorted partial count files per month. Files with existing partials are skipped on re-run — delete a partial manually to reprocess that month. Pass 2 always re-runs from scratch (output directory is wiped).
 
-ClickHouse mode has **no local files on prod**. All state lives in the database: watermark in `ingestion_log`, vocabulary in `ngram_vocabulary`, global counts in `global_counts`.
+ClickHouse mode has **no local files on prod**. All state lives in the database: watermark in `ingest_log`, vocabulary in `ngram_vocabulary`, global counts in `global_counts`.
 
 ### Tokenizer version guard
 
-ClickHouse mode checks `ingestion_log` for entries from a different tokenizer version and refuses to proceed. A tokenizer change requires a full rebuild via `process --output parquet` + `import`.
+ClickHouse mode checks `ingest_log` for entries from a different tokenizer version and refuses to proceed. A tokenizer change requires a full rebuild via `process --output parquet` + `import`.
 
 ---
 
@@ -639,7 +639,7 @@ For each Parquet file (concurrent read/tokenize, serial parquet write):
 
 After all files:
 6. Write `ngram_vocabulary.parquet` from the admitted vocabulary
-7. Write `ingestion_log.parquet` with watermark, tokenizer version, stats, duration
+7. Write `ingest_log.parquet` with watermark, tokenizer version, stats, duration
 
 ### ClickHouse mode (`--output clickhouse`)
 
@@ -647,8 +647,8 @@ Single-pass incremental pipeline:
 
 ```text
 process(data_dir, months, ch):
-    check for tokenizer version mismatch in ingestion_log
-    watermark = latest ingestion_log entry (0 if none)
+    check for tokenizer version mismatch in ingest_log
+    watermark = latest ingest_log entry (0 if none)
     global_counts = ch.load_global_counts()
     vocabulary = ch.load_vocabulary()
 
@@ -670,7 +670,7 @@ process(data_dir, months, ch):
         insert ngram_counts and bucket_totals into ClickHouse
 
     write updated global_counts to ClickHouse
-    insert ingestion_log entry (watermark, stats, duration)
+    insert ingest_log entry (watermark, stats, duration)
 ```
 
 ---
@@ -698,7 +698,7 @@ process(data_dir, months, ch):
 
 **Parquet mode:** local manifest tracks completed files. Re-running skips completed files. If a file fails mid-processing, no partial output is written (flush at file boundary). Output Parquet files are only finalized after all files are processed.
 
-**ClickHouse mode:** watermark from `ingestion_log` provides the restart point. If processing fails before the log entry is written, no watermark advances — re-run retries from the same point.
+**ClickHouse mode:** watermark from `ingest_log` provides the restart point. If processing fails before the log entry is written, no watermark advances — re-run retries from the same point.
 
 **Import:** staging tables are loaded before the swap. If import fails mid-load, staging tables can be dropped and retried. The swap itself is atomic per table.
 
@@ -787,7 +787,7 @@ Agent must NOT:
 * write per-comment ngram rows to ClickHouse
 * rely on ClickHouse for aggregation of raw data
 * use non-deterministic tokenization
-* recompute normalization at ingestion time
+* recompute normalization at ingest time
 * mutate historical data without full rebuild
 * use `chrono` crate — use `time` crate to match `hn-clickhouse`
 
@@ -797,14 +797,14 @@ Agent must NOT:
 
 ## Spec (mandatory)
 
-The ingestion binary provides three subcommands.
+The ingest binary provides three subcommands.
 
-### `ingestion download`
+### `ingest download`
 
 Download Parquet files from HuggingFace.
 
 ```text
-ingestion download [OPTIONS]
+ingest download [OPTIONS]
 
 Options:
   --data-dir <PATH>    Local storage directory [default: ./data/hn]
@@ -812,12 +812,12 @@ Options:
   --end <YYYY-MM>      Last month to download [default: current month]
 ```
 
-### `ingestion process`
+### `ingest process`
 
 Tokenize, count, prune, and output results. Output mode determines behavior:
 
 ```text
-ingestion process [OPTIONS]
+ingest process [OPTIONS]
 
 Options:
   --data-dir <PATH>    Directory with downloaded Parquet files [default: ./data/hn]
@@ -833,24 +833,24 @@ Options:
 * Processes full corpus (no watermark filtering)
 
 **ClickHouse mode** (`--output clickhouse`):
-* Reads watermark from `ingestion_log` table
+* Reads watermark from `ingest_log` table
 * Loads vocabulary and global counts from ClickHouse, expands with new admissions
 * All state in ClickHouse — no local files on prod
 * Inserts directly into ClickHouse
-* Logs run to `ingestion_log`
+* Logs run to `ingest_log`
 
-### `ingestion import`
+### `ingest import`
 
 Load Parquet output files into ClickHouse with atomic table swap.
 
 ```text
-ingestion import [OPTIONS]
+ingest import [OPTIONS]
 
 Options:
   --data-dir <PATH>    Directory containing output/ folder [default: ./data/hn]
 ```
 
-Loads all Parquet files from `{data-dir}/output/` into staging tables, swaps atomically, and appends the `ingestion_log.parquet` entry to the log table.
+Loads all Parquet files from `{data-dir}/output/` into staging tables, swaps atomically, and appends the `ingest_log.parquet` entry to the log table.
 
 ### Environment
 
@@ -872,21 +872,21 @@ CLICKHOUSE_DATABASE [default: hn_ngram]
 
 ```bash
 # On workstation
-ingestion download --start 2006-10 --end 2026-03
-ingestion process --output parquet --start 2006-10 --end 2026-03
+ingest download --start 2006-10 --end 2026-03
+ingest process --output parquet --start 2006-10 --end 2026-03
 
 # Transfer to prod
 scp -r data/hn/output/ prod:/path/to/data/hn/output/
 
 # On prod
-ingestion import --data-dir /path/to/data/hn
+ingest import --data-dir /path/to/data/hn
 ```
 
 ### Incremental update (on prod VPS)
 
 ```bash
-ingestion download --start 2026-03 --end 2026-03
-ingestion process --start 2026-03 --end 2026-03
+ingest download --start 2026-03 --end 2026-03
+ingest process --start 2026-03 --end 2026-03
 ```
 
 ### Full rebuild
@@ -899,7 +899,7 @@ Same as bootstrap. `import` does a full swap — the new data completely replace
 
 * three commands cover the full lifecycle with no redundancy
 * `process` with output flag avoids duplicating core logic
-* reasonable defaults mean `ingestion download && ingestion process` works out of the box
+* reasonable defaults mean `ingest download && ingest process` works out of the box
 * `--start`/`--end` allows processing a subset for testing
 
 ---

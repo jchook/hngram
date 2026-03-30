@@ -249,12 +249,12 @@ Only the `api` crate runs as a long-lived process in the dev loop.
 | `api` | **Yes** — `cargo watch` rebuilds and restarts on change | Long-running HTTP server |
 | `tokenizer` | **Indirectly** — recompiled when `api` rebuilds (it's a dependency) | Library crate |
 | `hn-clickhouse` | **Indirectly** — recompiled when `api` rebuilds (it's a dependency) | Library crate |
-| `ingestion` | **No** — separate CLI, run manually | Batch tool, not a service; pulls heavy deps (parquet, arrow, reqwest, rayon) that the API doesn't need |
+| `ingest` | **No** — separate CLI, run manually | Batch tool, not a service; pulls heavy deps (parquet, arrow, reqwest, rayon) that the API doesn't need |
 
-If actively developing the `ingestion` crate, run a separate ad-hoc watcher:
+If actively developing the `ingest` crate, run a separate ad-hoc watcher:
 
 ```bash
-cargo watch -w crates/ingestion -x 'check -p ingestion'
+cargo watch -w crates/ingest -x 'check -p ingest'
 ```
 
 This is not part of the standard dev orchestration.
@@ -263,7 +263,7 @@ This is not part of the standard dev orchestration.
 
 ## Rationale
 
-The `api` crate depends on `tokenizer` and `hn-clickhouse`, so changes to any of those three crates trigger an API rebuild automatically. The `ingestion` crate is a batch CLI with a separate dependency tree — including it in the watch would slow down incremental builds by pulling in parquet/arrow compilation and would serve no purpose since ingestion isn't running as a service during development.
+The `api` crate depends on `tokenizer` and `hn-clickhouse`, so changes to any of those three crates trigger an API rebuild automatically. The `ingest` crate is a batch CLI with a separate dependency tree — including it in the watch would slow down incremental builds by pulling in parquet/arrow compilation and would serve no purpose since ingest isn't running as a service during development.
 
 ---
 
@@ -630,5 +630,5 @@ The VPS has enough resources to build (4 GB RAM per RFC-007). Rust release build
 * running ClickHouse natively (Docker is fine for the database)
 * hot module replacement or other frontend-style HMR for Rust
 * remote development containers (VS Code devcontainers, GitHub Codespaces)
-* including the `ingestion` crate in the dev loop
+* including the `ingest` crate in the dev loop
 * IDE-specific configuration (VS Code tasks, IntelliJ run configs)

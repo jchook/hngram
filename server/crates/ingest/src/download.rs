@@ -9,7 +9,7 @@ use std::path::Path;
 /// Skips files that already exist locally.
 pub async fn download(data_dir: &Path, months: &[YearMonth]) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
-        .user_agent("hngram-ingestion/0.1")
+        .user_agent("hngram-ingest/0.1")
         .build()?;
 
     let total = months.len();

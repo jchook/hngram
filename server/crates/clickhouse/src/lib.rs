@@ -1,7 +1,7 @@
 //! ClickHouse integration for HN N-gram
 //!
 //! Provides Rust types and functions that mirror the ClickHouse schema (RFC-003).
-//! Used by both ingestion (writes) and API (reads).
+//! Used by both ingest (writes) and API (reads).
 
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub const TABLE_NGRAM_COUNTS: &str = "ngram_counts";
 pub const TABLE_BUCKET_TOTALS: &str = "bucket_totals";
 pub const TABLE_NGRAM_VOCABULARY: &str = "ngram_vocabulary";
 pub const TABLE_GLOBAL_COUNTS: &str = "global_counts";
-pub const TABLE_INGESTION_LOG: &str = "ingestion_log";
+pub const TABLE_INGEST_LOG: &str = "ingest_log";
 
 // ============================================================================
 // API Constants (RFC-005)
@@ -99,10 +99,10 @@ pub struct NgramVocabularyRow {
     pub admitted_at: OffsetDateTime,
 }
 
-/// Row in `ingestion_log` table.
+/// Row in `ingest_log` table.
 /// Omits `id` and `created_at` — ClickHouse provides defaults via generateUUIDv7() and now64().
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
-pub struct IngestionLogRow {
+pub struct IngestLogRow {
     pub tokenizer_version: String,
     pub command: String,
     pub last_ingested_ts: i64,
@@ -274,7 +274,7 @@ impl HnClickHouse {
     }
 
     // ========================================================================
-    // Insert Operations (for ingestion)
+    // Insert Operations (for ingest)
     // ========================================================================
 
     /// Insert n-gram counts in batch
@@ -311,21 +311,21 @@ impl HnClickHouse {
         Ok(())
     }
 
-    /// Insert a single ingestion log entry
-    pub async fn insert_ingestion_log(&self, row: &IngestionLogRow) -> Result<()> {
-        let mut insert = self.client.insert::<IngestionLogRow>(TABLE_INGESTION_LOG).await?;
+    /// Insert a single ingest log entry
+    pub async fn insert_ingest_log(&self, row: &IngestLogRow) -> Result<()> {
+        let mut insert = self.client.insert::<IngestLogRow>(TABLE_INGEST_LOG).await?;
         insert.write(row).await?;
         insert.end().await?;
         Ok(())
     }
 
-    /// Get the latest watermark (last_ingested_ts) from the ingestion log.
+    /// Get the latest watermark (last_ingested_ts) from the ingest log.
     /// Returns None if no entries exist for the current tokenizer version.
     pub async fn get_latest_watermark(&self) -> Result<Option<i64>> {
         let query = format!(
             r#"
             SELECT last_ingested_ts
-            FROM {TABLE_INGESTION_LOG}
+            FROM {TABLE_INGEST_LOG}
             WHERE tokenizer_version = ?
             ORDER BY id DESC
             LIMIT 1
@@ -352,7 +352,7 @@ impl HnClickHouse {
         let query = format!(
             r#"
             SELECT DISTINCT tokenizer_version
-            FROM {TABLE_INGESTION_LOG}
+            FROM {TABLE_INGEST_LOG}
             WHERE tokenizer_version != ?
             LIMIT 1
             "#
