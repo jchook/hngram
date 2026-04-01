@@ -137,8 +137,15 @@ async fn process_clickhouse(
         let path = local_path.clone();
         let wm = watermark;
         let granularity = proc_config.bucket_granularity;
-        let comments =
-            tokio::task::spawn_blocking(move || parquet::read_comments_after(&path, wm, granularity)).await??;
+        let comments = match
+            tokio::task::spawn_blocking(move || parquet::read_comments_after(&path, wm, granularity)).await?
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Skipping {} ({}/{}): {}", rel_path, i + 1, total, e);
+                continue;
+            }
+        };
 
         if comments.is_empty() {
             continue;

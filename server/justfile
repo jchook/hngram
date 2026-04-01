@@ -21,6 +21,24 @@ test:
 openapi:
   cargo run -p api --bin generate_openapi > openapi.json
 
+# Verify all downloaded Parquet files aren't corrupted (metadata check only, fast)
+check-data dir="./data/hn":
+  #!/usr/bin/env sh
+  set -e
+  bad=0
+  for f in $(find "{{dir}}/data" -name '*.parquet' | sort); do
+    if ! python3 -c "import pyarrow.parquet as pq; pq.read_metadata('$f')" 2>/dev/null; then
+      echo "CORRUPT: $f"
+      bad=$((bad + 1))
+    fi
+  done
+  if [ "$bad" -eq 0 ]; then
+    echo "All files OK"
+  else
+    echo "$bad corrupt file(s) found — delete and re-download"
+    exit 1
+  fi
+
 reset-db:
   cargo run -p ingest -- reset-db
 

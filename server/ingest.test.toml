@@ -7,8 +7,8 @@
 
 [process]
 output = "parquet"
-start = "2024-01"
-end = "2024-12"
+start = "2006-10"
+end = "2026-02"
 bucket_granularity = "monthly"
 
 [process.prune.1]
@@ -19,9 +19,9 @@ min_flush = 2
 [process.prune.2]
 min_global = 50     # recognizable phrases (~10-20K bigrams)
 min_bucket = 2
-min_flush = 3
+min_flush = 2
 
 [process.prune.3]
 min_global = 20     # real expressions (~5-10K trigrams)
 min_bucket = 2
-min_flush = 5
+min_flush = 2
