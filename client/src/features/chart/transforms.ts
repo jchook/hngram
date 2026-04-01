@@ -118,7 +118,6 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
     },
     legend: {
       show: true,
-      bottom: 0,
       formatter: (name: string) => {
         const s = series.find(s => s.label === name);
         if (s && s.globalCount > 0) return `${name} (${formatCount(s.globalCount)} total)`;
