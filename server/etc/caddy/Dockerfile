@@ -1,8 +1,9 @@
 # Build frontend with Bun
-# NOTE: client/src/gen/ (kubb-generated SDK) must already be populated
-# in the build context. CI runs `bun run gen` before `docker build`
-# because kubb misbehaves under bun inside this image.
-FROM oven/bun:1.3.3 AS builder
+FROM oven/bun:1.3.3-alpine AS builder
+
+# Real node is needed for kubb codegen — the bun image's "node" is a
+# bun shim, and kubb's plugin-oas misreads argv under it.
+RUN apk add --no-cache nodejs
 
 WORKDIR /app
 
@@ -12,11 +13,14 @@ COPY client/package.json client/bun.lock* ./
 # Install dependencies
 RUN bun install --frozen-lockfile
 
-# Copy client source (includes pre-generated src/gen)
+# Copy client source
 COPY client/ ./
 
-# Build static assets
-RUN bun run build
+# Copy OpenAPI spec for SDK generation (kubb config reads ../server/openapi.json)
+COPY server/openapi.json ../server/openapi.json
+
+# Generate SDK and build static assets
+RUN bun run gen && bun run build
 
 # Build Caddy with rate-limit module
 FROM caddy:2-builder AS caddy-builder
