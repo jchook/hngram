@@ -7,6 +7,7 @@ x-logging: &default-logging
 services:
   caddy:
     logging: *default-logging
+    image: ghcr.io/jchook/hngram-caddy:latest
     build:
       context: .
       dockerfile: server/etc/caddy/Dockerfile
@@ -26,6 +27,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    image: ghcr.io/jchook/hngram-api:latest
     build:
       context: ./server
       dockerfile: Dockerfile
