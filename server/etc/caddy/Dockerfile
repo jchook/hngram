@@ -1,4 +1,7 @@
 # Build frontend with Bun
+# NOTE: client/src/gen/ (kubb-generated SDK) must already be populated
+# in the build context. CI runs `bun run gen` before `docker build`
+# because kubb misbehaves under bun inside this image.
 FROM oven/bun:1.3.3 AS builder
 
 WORKDIR /app
@@ -9,7 +12,7 @@ COPY client/package.json client/bun.lock* ./
 # Install dependencies
 RUN bun install --frozen-lockfile
 
-# Copy client source
+# Copy client source (includes pre-generated src/gen)
 COPY client/ ./
 
 # Build static assets
