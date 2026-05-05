@@ -23,19 +23,30 @@ RUN mkdir -p crates/tokenizer/src crates/clickhouse/src \
     echo "fn main() {}" > crates/ingest/src/main.rs
 
 # Build dependencies only
-RUN cargo build --release --package api && \
+RUN cargo build --release --package api --package ingest && \
     rm -rf crates/*/src
 
 # Copy actual source and rebuild
 COPY crates/ crates/
+# Ingest crate compiles in the schema SQL via include_str!
+COPY etc/clickhouse/init/ etc/clickhouse/init/
 RUN touch crates/tokenizer/src/lib.rs crates/clickhouse/src/lib.rs \
-          crates/api/src/lib.rs crates/api/src/main.rs && \
-    cargo build --release --package api
+          crates/api/src/lib.rs crates/api/src/main.rs \
+          crates/ingest/src/main.rs && \
+    cargo build --release --package api --package ingest
 
-# Runtime stage
-FROM alpine:3
+# API runtime stage
+FROM alpine:3 AS api
 RUN apk add --no-cache ca-certificates && adduser -D -u 1000 app
 COPY --from=builder /app/target/release/api /app/api
 USER 1000:1000
 EXPOSE 3000
 CMD ["/app/api"]
+
+# Ingest runtime stage (CLI; invoked via `docker compose run --rm ingest ...`)
+FROM alpine:3 AS ingest
+RUN apk add --no-cache ca-certificates && adduser -D -u 1000 app
+COPY --from=builder /app/target/release/ingest /app/ingest
+USER 1000:1000
+WORKDIR /data
+ENTRYPOINT ["/app/ingest"]

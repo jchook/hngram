@@ -31,6 +31,7 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
+      target: api
     volumes:
       - ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt:/run/secrets/clickhouse_password:ro
     environment:
@@ -42,6 +43,27 @@ services:
       clickhouse:
         condition: service_healthy
     restart: unless-stopped
+
+  ingest:
+    logging: *default-logging
+    image: ghcr.io/jchook/hngram-ingest:latest
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      target: ingest
+    profiles: [ingest]
+    volumes:
+      - ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt:/run/secrets/clickhouse_password:ro
+      - ./server/output:/data/output
+      - ./server/data/hn:/data/hn
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_USER=hngram
+      - CLICKHOUSE_PASSWORD_FILE=/run/secrets/clickhouse_password
+      - RUST_LOG=info
+    depends_on:
+      clickhouse:
+        condition: service_healthy
 
   clickhouse:
     logging: *default-logging

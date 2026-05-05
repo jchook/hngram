@@ -9,6 +9,7 @@ env:
   REGISTRY: ghcr.io
   API_IMAGE: ghcr.io/jchook/hngram-api
   CADDY_IMAGE: ghcr.io/jchook/hngram-caddy
+  INGEST_IMAGE: ghcr.io/jchook/hngram-ingest
 
 jobs:
   build-api:
@@ -35,11 +36,45 @@ jobs:
         with:
           context: ./server
           file: ./server/Dockerfile
+          target: api
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
+
+  build-ingest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.INGEST_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          target: ingest
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=ingest
+            type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=ingest
 
   build-caddy:
     runs-on: ubuntu-latest
@@ -73,7 +108,7 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: [build-api, build-caddy]
+    needs: [build-api, build-caddy, build-ingest]
     steps:
       - uses: appleboy/ssh-action@v1
         with:
