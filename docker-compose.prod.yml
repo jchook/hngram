@@ -58,7 +58,7 @@ services:
       - ./server/data/hn:/data/hn
     environment:
       - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_USER=hngram
+      - CLICKHOUSE_USER=hngram_ingest
       - CLICKHOUSE_PASSWORD_FILE=/run/secrets/clickhouse_password
       - RUST_LOG=info
     depends_on:
