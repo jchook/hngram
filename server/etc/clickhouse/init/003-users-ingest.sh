@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SECRET_FILE="/run/secrets/clickhouse_password"
+SECRET_FILE="/run/secrets/clickhouse_ingest_password"
 
 # Skip in dev (no secret file mounted)
 if [ ! -f "$SECRET_FILE" ]; then
