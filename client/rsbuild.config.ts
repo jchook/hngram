@@ -25,6 +25,9 @@ export default defineConfig({
       root: 'dist',
     },
   },
+  html: {
+    template: './index.html',
+  },
   tools: {
     postcss: {
       postcssOptions: {
