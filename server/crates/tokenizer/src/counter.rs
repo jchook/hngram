@@ -37,6 +37,8 @@ impl Default for PruningConfig {
         thresholds.insert(1, NgramThreshold { min_global: 0, min_bucket: 1, min_flush: 1 });
         thresholds.insert(2, NgramThreshold { min_global: 20, min_bucket: 3, min_flush: 2 });
         thresholds.insert(3, NgramThreshold { min_global: 10, min_bucket: 5, min_flush: 2 });
+        thresholds.insert(4, NgramThreshold { min_global: 8, min_bucket: 2, min_flush: 2 });
+        thresholds.insert(5, NgramThreshold { min_global: 5, min_bucket: 2, min_flush: 2 });
         Self { thresholds }
     }
 }
@@ -137,18 +139,41 @@ pub struct BucketKey {
     pub n: u8,
 }
 
+/// Default maximum n-gram order when none is specified.
+pub const DEFAULT_MAX_N: u8 = 3;
+
 /// Aggregated n-gram counts for a processing batch
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NgramCounter {
     /// Counts per (bucket, n, ngram)
     counts: HashMap<NgramKey, u32>,
     /// Total n-grams per (bucket, n) for denominators
     totals: HashMap<BucketKey, u64>,
+    /// Highest n-gram order to count (1..=max_n).
+    max_n: u8,
+}
+
+impl Default for NgramCounter {
+    fn default() -> Self {
+        Self {
+            counts: HashMap::new(),
+            totals: HashMap::new(),
+            max_n: DEFAULT_MAX_N,
+        }
+    }
 }
 
 impl NgramCounter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a counter that will generate n-grams up to and including `max_n`.
+    pub fn with_max_n(max_n: u8) -> Self {
+        Self {
+            max_n,
+            ..Self::default()
+        }
     }
 
     /// Process a single comment's tokens for a given bucket
@@ -163,8 +188,7 @@ impl NgramCounter {
         // Reusable buffer avoids repeated growth when building n-gram strings
         let mut ngram_buf = String::new();
 
-        // Generate and count 1-grams, 2-grams, 3-grams
-        for n in 1..=3u8 {
+        for n in 1..=self.max_n {
             let n_usize = n as usize;
             if k < n_usize {
                 continue;
@@ -300,12 +324,16 @@ mod tests {
         assert_eq!(config.min_global_count(1), 0);
         assert_eq!(config.min_global_count(2), 20);
         assert_eq!(config.min_global_count(3), 10);
+        assert_eq!(config.min_global_count(4), 8);
+        assert_eq!(config.min_global_count(5), 5);
         assert_eq!(config.min_bucket_count(1), 1);
         assert_eq!(config.min_bucket_count(2), 3);
         assert_eq!(config.min_bucket_count(3), 5);
-        // Unknown n values are rejected
-        assert_eq!(config.min_global_count(4), u64::MAX);
-        assert_eq!(config.min_bucket_count(4), u32::MAX);
+        assert_eq!(config.min_bucket_count(4), 2);
+        assert_eq!(config.min_bucket_count(5), 2);
+        // Unknown n values (above 5) are rejected
+        assert_eq!(config.min_global_count(6), u64::MAX);
+        assert_eq!(config.min_bucket_count(6), u32::MAX);
     }
 
     #[test]

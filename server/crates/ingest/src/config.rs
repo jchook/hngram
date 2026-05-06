@@ -59,6 +59,7 @@ pub struct ProcessSection {
     pub producer_count: Option<usize>,
     pub merge_shards: Option<usize>,
     pub bucket_granularity: Option<BucketGranularity>,
+    pub max_n: Option<u8>,
     pub prune: Option<HashMap<String, PruneThreshold>>,
 }
 

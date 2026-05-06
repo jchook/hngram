@@ -70,6 +70,9 @@ enum Command {
         /// Bucket granularity: daily, monthly, yearly (overrides config file)
         #[arg(long)]
         bucket_granularity: Option<config::BucketGranularity>,
+        /// Highest n-gram order to count, 1..=5 (overrides config file)
+        #[arg(long)]
+        max_n: Option<u8>,
         /// Path to TOML config file
         #[arg(long)]
         config: Option<PathBuf>,
@@ -150,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
             producer_count,
             merge_shards,
             bucket_granularity,
+            max_n,
             config,
         } => {
             // Load TOML config file if provided
@@ -216,6 +220,9 @@ async fn main() -> anyhow::Result<()> {
                 bucket_granularity: bucket_granularity
                     .or(toml_process.bucket_granularity)
                     .unwrap_or(defaults.bucket_granularity),
+                max_n: max_n
+                    .or(toml_process.max_n)
+                    .unwrap_or(defaults.max_n),
                 prune: toml_process.prune,
             };
             process::process(&data_dir, &months, &start, &end, mode, ch.as_ref(), &proc_config)

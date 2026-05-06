@@ -1,0 +1,43 @@
+# Full-corpus production config: monthly buckets, n=1..=5, low pruning to
+# capture the long tail. Designed for a beefy temporary machine (~16+ vCPU,
+# 32-64GB RAM) doing a full rebuild from scratch.
+#
+# Usage:
+#   cargo run -p ingest -- process --config ingest.full.toml
+#   # then transfer output/ to prod and:
+#   cargo run -p ingest -- import
+
+[process]
+output = "parquet"
+bucket_granularity = "monthly"
+max_n = 5
+
+# Large flush window so each batch effectively spans a full month.
+# Combined with monthly bucket_granularity, this means min_flush behaves
+# as a per-month floor — exactly the long-tail signal we want to keep.
+max_entries = 200_000_000
+
+[process.prune.1]
+min_global = 0      # always admit unigrams
+min_bucket = 1
+min_flush = 1
+
+[process.prune.2]
+min_global = 15     # slight loosening from prod's 20
+min_bucket = 2      # capture sparse months (e.g., early HN)
+min_flush = 2
+
+[process.prune.3]
+min_global = 8      # slight loosening from prod's 10
+min_bucket = 2
+min_flush = 2
+
+[process.prune.4]
+min_global = 5
+min_bucket = 2
+min_flush = 2
+
+[process.prune.5]
+min_global = 3      # 5-grams are inherently rare; let them through
+min_bucket = 1
+min_flush = 2

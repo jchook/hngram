@@ -75,7 +75,13 @@ fn millis_to_date_string(ms: i64, granularity: BucketGranularity) -> Option<Stri
 /// Stream NgramCounter data from a Parquet file, one batch at a time.
 /// Calls `on_batch` with each batch's NgramCounter (per-bucket counts + totals).
 /// Memory per batch: one NgramCounter for ~8192 rows (a few MB).
-pub fn stream_counters<F>(path: &Path, min_ts: i64, granularity: BucketGranularity, mut on_batch: F) -> anyhow::Result<()>
+pub fn stream_counters<F>(
+    path: &Path,
+    min_ts: i64,
+    granularity: BucketGranularity,
+    max_n: u8,
+    mut on_batch: F,
+) -> anyhow::Result<()>
 where
     F: FnMut(NgramCounter) -> anyhow::Result<()>,
 {
@@ -95,7 +101,7 @@ where
             continue;
         }
 
-        let counter = process_comments_parallel(&comments);
+        let counter = process_comments_parallel(&comments, max_n);
         on_batch(counter)?;
     }
 
@@ -187,24 +193,24 @@ fn extract_comments_from_batch(
 }
 
 /// Process comments in parallel using rayon, returning a merged NgramCounter.
-pub fn process_comments_parallel(comments: &[Comment]) -> NgramCounter {
+pub fn process_comments_parallel(comments: &[Comment], max_n: u8) -> NgramCounter {
     use rayon::prelude::*;
 
     if comments.is_empty() {
-        return NgramCounter::new();
+        return NgramCounter::with_max_n(max_n);
     }
 
     comments
         .par_chunks(1024)
         .map(|chunk| {
-            let mut counter = NgramCounter::new();
+            let mut counter = NgramCounter::with_max_n(max_n);
             for c in chunk {
                 let tokens = tokenizer::tokenize(&c.text);
                 counter.process_comment(&c.bucket, &tokens);
             }
             counter
         })
-        .reduce(NgramCounter::new, |mut a, b| {
+        .reduce(|| NgramCounter::with_max_n(max_n), |mut a, b| {
             a.merge(b);
             a
         })

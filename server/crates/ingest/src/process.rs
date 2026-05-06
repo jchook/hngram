@@ -36,6 +36,8 @@ pub struct ProcessConfig {
     pub merge_shards: usize,
     /// Bucket granularity for n-gram counts.
     pub bucket_granularity: config::BucketGranularity,
+    /// Highest n-gram order to count (1..=max_n).
+    pub max_n: u8,
     /// Pruning thresholds from TOML [process.prune] section.
     pub prune: Option<HashMap<String, config::PruneThreshold>>,
 }
@@ -50,6 +52,7 @@ impl Default for ProcessConfig {
             producer_count: cpus,
             merge_shards: cpus,
             bucket_granularity: config::BucketGranularity::default(),
+            max_n: tokenizer::counter::DEFAULT_MAX_N,
             prune: None,
         }
     }
@@ -167,8 +170,9 @@ async fn process_clickhouse(
         let comment_count = comments.len();
         total_comments += comment_count as u64;
 
+        let max_n = proc_config.max_n;
         let counter =
-            tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments))
+            tokio::task::spawn_blocking(move || parquet::process_comments_parallel(&comments, max_n))
                 .await?;
 
         // Update global counts
@@ -347,8 +351,9 @@ async fn process_parquet(
         tracing::info!("Source processing already complete (.complete marker found), skipping to merge");
     } else {
         tracing::info!(
-            "Processing {} source files (max_entries={}, producers={}, shards={})",
+            "Processing {} source files (max_n={}, max_entries={}, producers={}, shards={})",
             total,
+            proc_config.max_n,
             proc_config.max_entries,
             proc_config.producer_count,
             proc_config.merge_shards,
@@ -469,6 +474,7 @@ async fn process_parquet(
             let permit = sem.clone().acquire_owned().await.unwrap();
 
             let granularity = proc_config.bucket_granularity;
+            let max_n = proc_config.max_n;
             tokio::spawn(async move {
                 let _permit = permit;
                 tracing::info!("Processing: {} ({}/{})", rel_path, i + 1, total);
@@ -477,7 +483,7 @@ async fn process_parquet(
                 let rel = rel_path.clone();
                 let tx2 = tx.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    parquet::stream_counters(&path, 0, granularity, |counter| {
+                    parquet::stream_counters(&path, 0, granularity, max_n, |counter| {
                         tx.blocking_send(Msg::Batch(counter))
                             .map_err(|_| anyhow::anyhow!("Consumer dropped"))
                     })

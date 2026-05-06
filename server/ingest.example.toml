@@ -8,6 +8,7 @@
 #   ingest.test.toml  — aggressive pruning for quick smoke tests
 #   ingest.dev.toml   — moderate pruning for local development
 #   ingest.prod.toml  — minimal pruning for production
+#   ingest.full.toml  — full corpus, n=1..=5, monthly buckets (beefy box)
 
 [process]
 
@@ -34,6 +35,13 @@ output = "parquet"
 # independently on its own thread. More shards = more parallelism but more
 # file handles. Default: number of CPU cores.
 # merge_shards = 32
+
+# Highest n-gram order to count. Default: 3. Maximum: 5.
+# Lower values run faster and produce smaller datasets; higher values let
+# users query 4- and 5-word phrases (e.g. "rate of return on capital").
+# The API accepts up to n=5 regardless; n values that weren't ingested
+# simply return no data.
+# max_n = 3
 
 # Bucket granularity: "daily" (default), "monthly", or "yearly".
 # Controls the time resolution of stored n-gram counts.
@@ -82,3 +90,15 @@ min_flush = 2       # filter singletons per flush batch
 min_global = 10     # trigrams must appear 10+ times corpus-wide
 min_bucket = 5      # need 5+ occurrences on a single day
 min_flush = 2       # filter singletons per flush batch
+
+# Defaults below apply only when max_n >= 4. Listed here for reference.
+
+[process.prune.4]
+min_global = 8
+min_bucket = 2
+min_flush = 2
+
+[process.prune.5]
+min_global = 5
+min_bucket = 2
+min_flush = 2

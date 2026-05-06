@@ -9,6 +9,9 @@ ingest-dev:
 ingest-test:
   cargo run -p ingest -- process --config ingest.test.toml "$@"
 
+ingest-full:
+  cargo run --release -p ingest -- process --config ingest.full.toml "$@"
+
 import *args="":
   cargo run -p ingest -- import "$@"
 

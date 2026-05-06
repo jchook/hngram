@@ -34,8 +34,9 @@ pub const HN_DEFAULT_START_DATE: (i32, time::Month, u8) = (2011, time::Month::Ja
 /// Maximum phrases per query
 pub const MAX_PHRASES: usize = 10;
 
-/// Maximum n-gram order (1, 2, or 3)
-pub const MAX_NGRAM_ORDER: u8 = 3;
+/// Maximum n-gram order accepted by the API (1..=5).
+/// Whether each n is actually populated depends on the ingest profile's `max_n`.
+pub const MAX_NGRAM_ORDER: u8 = 5;
 
 /// Create the default start date as a `time::Date`
 pub fn default_start_date() -> Date {
@@ -503,7 +504,7 @@ impl HnClickHouse {
         start: Date,
         end: Date,
     ) -> Result<Vec<NgramQueryResult>> {
-        if n < 1 || n > 3 {
+        if n < 1 || n > MAX_NGRAM_ORDER {
             return Err(ClickHouseError::InvalidNgramOrder(n));
         }
         if ngrams.is_empty() {
@@ -554,7 +555,7 @@ impl HnClickHouse {
         end: Date,
         granularity: Granularity,
     ) -> Result<Vec<AggregatedQueryResult>> {
-        if n < 1 || n > 3 {
+        if n < 1 || n > MAX_NGRAM_ORDER {
             return Err(ClickHouseError::InvalidNgramOrder(n));
         }
         if ngrams.is_empty() {
@@ -780,6 +781,6 @@ mod tests {
     #[test]
     fn api_constants() {
         assert_eq!(MAX_PHRASES, 10);
-        assert_eq!(MAX_NGRAM_ORDER, 3);
+        assert_eq!(MAX_NGRAM_ORDER, 5);
     }
 }
