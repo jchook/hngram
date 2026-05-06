@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Container, Paper, Stack, Text, Title } from '@mantine/core';
+import { Container, Paper, Stack, Text } from '@mantine/core';
 import { useQueries } from '@tanstack/react-query';
 import { ngramQueryOptions } from '@/gen';
 import type { NgramQueryResponse } from '@/gen';
@@ -72,15 +72,18 @@ export default function App() {
   const allDone = results.every(r => !r.isLoading);
 
   return (
-    <Container size="lg" py="xl">
-      <Stack gap="lg">
-        <div>
-          <Title order={1}>HN N-gram Viewer</Title>
-          <Text c="dimmed">
-            Explore word and phrase trends in Hacker News comments over time
-          </Text>
-        </div>
-
+    <>
+      <header className="hn-header">
+        <a href="/" className="hn-logo" aria-label="HN N-gram home">
+          <img src="/y18.svg" alt="" width={18} height={18} />
+        </a>
+        <a href="/" className="hn-name">HN N-gram</a>
+        <span className="hn-tagline">
+          Explore word and phrase trends in Hacker News comments over time
+        </span>
+      </header>
+      <Container size="lg" py="md">
+        <Stack gap="md">
         <Paper p="md" withBorder>
           <QueryControls state={state} onSubmit={setQuery} />
         </Paper>
@@ -98,7 +101,13 @@ export default function App() {
             <TimeSeriesChart option={chartOption} loading />
           ) : null}
         </Paper>
-      </Stack>
-    </Container>
+        </Stack>
+      </Container>
+      <footer className="hn-footer">
+        <a href="https://github.com/jchook/hngram" target="_blank" rel="noopener noreferrer">
+          GitHub
+        </a>
+      </footer>
+    </>
   );
 }
