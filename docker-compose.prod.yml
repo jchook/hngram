@@ -53,13 +53,13 @@ services:
       target: ingest
     profiles: [ingest]
     volumes:
-      - ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_ingest_password.txt:/run/secrets/clickhouse_ingest_password:ro
+      - ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt:/run/secrets/clickhouse_password:ro
       - ./server/output:/data/output
       - ./server/data/hn:/data/hn
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_USER=hngram_ingest
-      - CLICKHOUSE_PASSWORD_FILE=/run/secrets/clickhouse_ingest_password
+      - CLICKHOUSE_PASSWORD_FILE=/run/secrets/clickhouse_password
       - RUST_LOG=info
     depends_on:
       clickhouse:
@@ -71,7 +71,6 @@ services:
     image: clickhouse/clickhouse-server:26.3-alpine
     secrets:
       - clickhouse_password
-      - clickhouse_ingest_password
     volumes:
       - ./server/data/clickhouse:/var/lib/clickhouse
       - ./server/etc/clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
@@ -91,8 +90,6 @@ services:
 secrets:
   clickhouse_password:
     file: ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_password.txt
-  clickhouse_ingest_password:
-    file: ${SECRETS_DIR:-/srv/hngram/secrets}/clickhouse_ingest_password.txt
 
 volumes:
   caddy_data:
