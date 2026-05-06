@@ -88,8 +88,8 @@ export interface ChartSeries {
 }
 
 const COLORS = [
-  '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
-  '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0',
+  '#ff6600', '#1f77b4', '#2ca02c', '#9467bd', '#d62728',
+  '#17becf', '#8c564b', '#bcbd22', '#e377c2', '#7f7f7f',
 ];
 
 /**
