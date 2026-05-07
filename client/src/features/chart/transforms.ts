@@ -14,6 +14,9 @@ type Granularity = 'day' | 'week' | 'month' | 'year';
 
 /**
  * Fill missing buckets with v=0 to produce a continuous series.
+ *
+ * The fill stops at the latest data point so the line ends where data ends
+ * rather than dropping to zero into the future (or past the ingest watermark).
  */
 export function fillMissingBuckets(
   points: Point[],
@@ -21,17 +24,23 @@ export function fillMissingBuckets(
   end: string,
   granularity: Granularity,
 ): Point[] {
-  // Build lookup from sparse data
+  if (points.length === 0) return [];
+
   const lookup = new Map<string, Point>();
+  let lastDataT = points[0].t;
   for (const p of points) {
     lookup.set(p.t, p);
+    if (p.t > lastDataT) lastDataT = p.t;
   }
+
+  const requestedEnd = dayjs(end);
+  const dataEnd = dayjs(lastDataT);
+  const fillEnd = dataEnd.isBefore(requestedEnd) ? dataEnd : requestedEnd;
 
   const result: Point[] = [];
   let current = alignToBucket(dayjs(start), granularity);
-  const endDate = dayjs(end);
 
-  while (current.isBefore(endDate) || current.isSame(endDate, 'day')) {
+  while (current.isBefore(fillEnd) || current.isSame(fillEnd, 'day')) {
     const key = current.format('YYYY-MM-DD');
     const existing = lookup.get(key);
     result.push(existing ?? { t: key, v: 0, count: 0, total: 0 });

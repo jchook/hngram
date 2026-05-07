@@ -117,7 +117,7 @@ docker compose up -d
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Prod is a standalone compose file with its own ClickHouse config (`config.prod.xml` for memory/pool limits, `users.prod.xml` for auth). Secrets are mounted from the host via Docker Compose secrets (see `docs/RFC-011-production-security.md`).
+Prod is a standalone compose file with its own ClickHouse config (`config.prod.xml` for memory/pool limits, `users.prod.xml` for auth). Secrets are mounted from the host via Docker Compose secrets (see `docs/RFC-012-production-security.md`).
 
 ## Gotchas
 
