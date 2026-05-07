@@ -87,19 +87,24 @@ write ngram_vocabulary.parquet      // existing logic
 
 ### 2.3 Memory budget
 
-Peak RAM at any point in either pass:
+Peak RAM differs between the two passes — globals is built in Pass 1 and consumed by `build_vocabulary` to produce `vocabulary`; only `vocabulary` survives into Pass 2. `globals` and `vocab_counts` can both be dropped at the Pass 1 / Pass 2 boundary.
 
-```
-peak ≈ globals_hashmap + one_shard_hashmap + writer_buffers + OS
-```
+**Pass 1 peak**: `globals_hashmap + one_shard_hashmap + writer_buffers`
+**Pass 2 peak**: `vocabulary + one_shard_hashmap + totals_hashmap + writer_buffers`
 
 For a full-profile HN build:
-* `globals_hashmap`: ~50–80M unique (n, ngram) entries × ~80B = 4–6GB
+* `globals_hashmap`: ~50–80M unique (n, ngram) × ~80B = 4–6GB
+* `vocabulary` (Pass 2 only): admitted entries only, ~10–20M × ~50B = 0.5–1GB
 * `one_shard_hashmap`: ~30–50M unique entries × ~250B = 7–12GB
+* `totals_hashmap` (Pass 2 only): one entry per (bucket, n) — for monthly × n=5, ~1200 entries, negligible
 * Writer buffers: low hundreds of MB
-* **Total: ~12–18GB** vs the current ~70–100GB
+* **Pass 1 peak: ~12–18GB. Pass 2 peak: ~8–13GB** (lower because vocabulary is much smaller than globals)
 
 This fits comfortably on a 30GB box without swap.
+
+### 2.4 Cleanup: remove `vocab_counts`
+
+The existing `vocab_counts: HashMap<(u8, String), u64>` (`process.rs:553, 583-585`) exists only to assemble vocabulary rows for the parquet writer at the end. Its contents can be written inline during the globals iteration: when a `(n, ngram)` is being written to `global_counts.parquet` AND it's in `vocabulary`, also append it to `ngram_vocabulary.parquet`'s writer. This removes a multi-million-entry hashmap from the live set across the entire post-merge phase.
 
 ## 3. Trade-offs
 
@@ -109,34 +114,54 @@ This fits comfortably on a 30GB box without swap.
 
 ## 4. Alternatives Considered
 
-### 4.1 Bigger box, smaller shards
+### 4.1 Inline globals during source processing (the better long-term design)
+
+Maintain a second aggregator in the consumer (`process.rs:412-451`) alongside the per-bucket counts: `globals: HashMap<(u8, String), u64>`, updated on every batch *before* `min_flush_count` pruning. Persist it as a sibling of `.complete`. At merge time, globals are already built — only one streaming pass over shards is needed (filter against vocabulary, write counts).
+
+**Why this is strictly better than the two-pass approach:**
+
+* **Speed**: halves merge wall-clock and disk I/O. This is the primary motivation.
+* **Better long-tail coverage**: produces unpruned true globals. The current pipeline derives globals from post-flush-pruned shard data, which means a low-frequency long-tail ngram appearing once per batch but across many batches has its true global count under-counted by `min_flush`. With ~20M-entry batches, this is a narrow class of ngrams (rare-per-batch but accumulating-across-batches), so the practical signal recovery is modest — but real, and free if we're inline-aggregating anyway.
+* **Cost** (the constraint moves, not eliminates): the ~4–6GB `globals` hashmap lives in the consumer concurrently with the bucket-keyed counts, the producer NgramCounters in flight, and rayon worker stacks. Source processing today is RAM-light, so this likely fits — but it raises the floor during processing, where the two-pass design pays only at merge time. On a 16GB box this could matter; on a 30GB box it's still fine.
+
+**Why we are NOT doing it for this rebuild:**
+
+We already have 24GB of post-flush-pruned partial files on disk and a valid `.complete` marker, representing 7+ hours of source processing on a memory-constrained box. Adding inline globals to the consumer requires re-running source processing from scratch. The two-pass approach in §2 uses the existing partials as-is.
+
+**Recommendation for follow-up RFC**: implement inline globals as RFC-013 (or fold it into the next ingest-pipeline change). It's strictly faster, gives better data, and replaces Pass 1 of this RFC entirely.
+
+### 4.2 Bigger box, smaller shards
 
 Rent a 64GB box for the merge. Doesn't compose: the merge memory grows with corpus + n range. Future profiles (e.g. n=6 or daily granularity) blow past 64GB the same way.
 
-### 4.2 Limit `RAYON_NUM_THREADS=1`
+### 4.3 Limit `RAYON_NUM_THREADS=1`
 
 Tried. Makes the merge sequential but `Vec<HashMap>` still holds all completed shards simultaneously. Same OOM, just slower.
 
-### 4.3 Lower `merge_shards`
+### 4.4 Lower `merge_shards`
 
 Reducing num_shards just makes each shard bigger. Peak RAM doesn't change — it just shifts between "many small maps" and "few big maps." And shard count is fixed at write-time, so changing it requires re-processing.
 
-### 4.4 External merge sort
+### 4.5 External merge sort
 
-Write each shard to a sorted binary temp file, then linear-merge by sorted (n, ngram, bucket) keys. Bounds RAM to a small read buffer regardless of corpus. **The right answer for any future corpus 10x bigger** — but a much bigger refactor. Out of scope here.
+Sort each shard's binary output on `(n, ngram, bucket)` at write time, then heap-merge across shards at read time. The merge phase becomes a streaming pipeline with O(num_shards) live entries — no per-shard hashmap at all, and globals fall out of grouped iteration over the heap. Bounds RAM to a small read buffer regardless of corpus.
+
+This is a real refactor — the existing partial format and `write_sharded` would change — but not a huge one, maybe 1–2 days of work. Worth considering for the next ingest-pipeline overhaul, especially if combined with §4.1's inline globals (which would make external sort even simpler since vocabulary admission can happen inline).
 
 ## 5. Implementation Notes
 
-* `merge_shards_streaming` replaces `merge_shards_parallel` rather than living alongside it. There's only one caller and the old API is the source of the OOM.
-* The two-pass pattern reads partial files twice. Each pass is a clean iteration; no mid-pass state to carry between them.
-* `globals` lives across both passes. It's the only thing that survives shard hashmap drops within Pass 1.
-* No changes to the binary partial file format. The on-disk layout from existing builds is reused.
+* `merge_shards_streaming` is added; `merge_shards_parallel` is kept around for **one PR cycle as `#[cfg(test)]` only**, used solely by the validation harness (§6.2) to assert byte-for-byte equivalence on synthetic data. Once the new merge has run end-to-end on real data and produced output that imports cleanly to ClickHouse, the old function is removed in a follow-up. This avoids the §5/§6 chicken-and-egg of "removed the thing we want to compare against."
+* The two-pass pattern reads partial files twice. Each pass is a clean iteration; no mid-pass state to carry between them. `globals` lives across both passes (built in Pass 1, consumed in Pass 2's vocabulary check via the precomputed `vocabulary` HashMap).
+* **Resumability is unchanged**: the `.complete` marker still gates source processing, which is the expensive phase. If Pass 2 crashes, only Passes 1 + 2 are redone — both of which are cheap enough (~10–20 min combined on the full corpus) that re-running on retry is not worth designing around. No new resume markers needed.
+* **Bucket interning is per-shard**, same as today: `bucket_intern: HashMap<String, Arc<str>>` is created fresh inside `read_shard_file`'s caller scope, so a bucket date seen in shard 0 and shard 1 gets re-allocated. With ~240 monthly buckets × 8 shards × ~10 chars = a few thousand string allocations across the full merge — not a regression and not worth optimizing.
+* No changes to the binary partial file format. The on-disk layout from existing builds is reused as-is.
 
 ## 6. Validation
 
-1. Unit tests in `vocabulary.rs` for `merge_shards_streaming` (small synthetic data).
-2. End-to-end: re-run the in-flight HN full build using the existing 24GB partial dir. Should complete on the 30GB box without swap pressure.
-3. Compare row counts of resulting parquet files against the in-progress dev dataset: same shape, larger volume.
+1. Unit tests in `vocabulary.rs` for `merge_shards_streaming` (small synthetic data, deterministic input → deterministic output).
+2. **Byte-for-byte invariant**: for the same partial-dir input and identical `PruningConfig`, the new merge must produce the same `total_count_rows`, `total_total_rows`, and `total_gc_rows` as the old `merge_shards_parallel`. Output parquet row counts should match exactly. (Set up by running the old merge to completion on a small synthetic dataset, then running the new merge on the same partials and diffing parquet metadata.)
+3. End-to-end: re-run the in-flight HN full build using the existing 24GB partial dir. Should complete on the 30GB box without swap pressure.
+4. Sanity: compare admitted bigrams and trigrams against the dev dataset — same shape, larger volume due to lower thresholds.
 
 ## 7. Rollout
 
