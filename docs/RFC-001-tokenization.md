@@ -1,365 +1,172 @@
-Great—this is the right place to start. Tokenization will quietly determine whether your entire system feels “right” or subtly broken.
+# Tokenization
 
-Below is a **proper RFC-style spec** you can implement directly in Rust.
+How HN comments are turned into tokens that get counted and charted. This is the only stage where text exists — after tokenization, the system stores nothing but per-day counts of (n-gram, count) pairs.
 
----
+Status: implemented in `server/crates/tokenizer/src/lib.rs`. The behavior described here is the behavior in production — examples are direct test cases.
 
-# 📄 RFC-001: Tokenization Specification
+## Why it matters
 
-## Status
+Tokenization quietly determines whether the whole system feels right. Subtle rule changes shift which phrases get counted as the same thing, which fragments split into multiple tokens, and which n-grams cross the pruning threshold. Once data is ingested under one set of rules, retroactively changing them invalidates every chart.
 
-**Implemented** in `server/crates/tokenizer/src/lib.rs`
+Two principles drive every decision below:
 
----
+1. **Determinism over linguistic correctness.** Same input must always produce identical tokens. We accept losing some natural-language nuance to avoid drift.
+2. **Stability over time.** Rules don't get tweaked casually. Any change increments the tokenizer version (currently `1`), and old data stays tagged with its original version.
 
-## 1. 🎯 Goals
+## Goals and non-goals
 
-Define a **deterministic, reproducible, high-performance tokenizer** for Hacker News comments that:
+Goals:
 
-* Produces consistent results across time
-* Preserves meaningful technical tokens (e.g. `c++`, `node.js`, `gpt-4`)
-* Is fast enough for large-scale batch processing
-* Avoids dependence on ML/NLP models
+- Produce consistent results across time and machines.
+- Preserve technical tokens that HN talks about constantly: `c++`, `node.js`, `gpt-4`, `x86-64`.
+- Run fast enough for batch processing the full HN corpus.
+- No ML, no NLP models — the tokenizer is a few hundred lines of pure Rust.
 
----
+Non-goals:
 
-## 2. ❌ Non-Goals
+- Sentence segmentation.
+- Named entity detection.
+- Synonym normalization (`js` and `javascript` stay distinct).
+- Context-sensitive rules. The same character sequence always tokenizes the same way.
+- Grammatical correctness.
 
-This tokenizer will **not**:
+## Pipeline
 
-* Perform sentence segmentation
-* Detect named entities
-* Normalize synonyms (e.g. “js” ≠ “javascript”)
-* Use context-dependent rules
-* Attempt grammatical correctness
-
----
-
-## 3. 🧠 Design Principles
-
-### 3.1 Determinism > correctness
-
-Same input must always produce identical tokens.
-
-### 3.2 Stability over time
-
-Rules must not change frequently—changes invalidate historical comparability.
-
-### 3.3 HN-native behavior
-
-Prioritize:
-
-* programming languages
-* libraries
-* file formats
-* version strings
-
-over traditional English NLP correctness.
-
----
-
-## 4. 🔄 Processing Pipeline
-
-Each comment goes through:
-
-```id="pipeline"
-HTML → Plain Text → Normalize → Tokenize → Emit tokens
+```
+HTML → Plain text → Normalize → Lowercase → Tokenize → Emit
 ```
 
----
+Each stage is pure and order-dependent.
 
-## 5. 🧱 Step-by-Step Specification
+## Stages
 
-## 5.1 HTML Stripping
+### 1. HTML stripping
 
-### Input:
+HN comments come as HTML. Tags are removed and entities are decoded.
 
-Raw HN comment HTML
-
-### Rules:
-
-* Remove all tags
-* Decode HTML entities (`&amp;`, `&lt;`, etc.)
-* Preserve visible text only
-
-### Example:
-
-```id="html"
-"<p>Hello &amp; welcome</p>"
-→ "Hello & welcome"
+```
+"<p>Hello &amp; welcome</p>"  →  "Hello & welcome"
 ```
 
----
+### 2. URL extraction
 
-## 5.2 Unicode Normalization
+URLs are detected before tokenization and replaced with their domain only. Path segments would otherwise produce misleading n-grams (e.g., `foo bar` from `/foo/bar`), and people don't search for path components anyway.
 
-* Normalize to **NFKC**
-* Remove zero-width characters
-* Normalize quotes:
-
-  * `“ ”` → `"`
-  * `‘ ’` → `'`
-
----
-
-## 5.3 Case Normalization
-
-* Default: **lowercase everything**
-
-```id="case"
-"Rust is GREAT"
-→ ["rust", "is", "great"]
+```
+"Check https://example.com/foo/bar"  →  ["check", "example.com"]
+"Check out github.com/rust-lang/rust"  →  ["check", "out", "github.com"]
 ```
 
-Future extension:
+URLs with a protocol (`https?://...`) are matched directly. URLs without a protocol are only extracted if they include a path — bare domains like `example.com` are left for normal tokenization to pick up.
 
-* optional case-sensitive corpus
+### 3. Unicode normalization
 
----
+- Apply NFKC.
+- Remove zero-width characters (`U+200B`, `U+200C`, `U+200D`, `U+FEFF`).
+- Normalize curly quotes to straight: `“ ” → "`, `‘ ’ → '`.
 
-## 5.4 Token Character Rules
+### 4. Case normalization
 
-### Allowed characters inside tokens:
+Everything is lowercased. There is no case-sensitive corpus.
 
-* letters: `a–z`
-* digits: `0–9`
-* apostrophe: `'`
-* plus: `+`
-* hash: `#`
-* dot: `.` (conditional, see below)
-* hyphen: `-` (conditional)
-
----
-
-## 5.5 Token Boundary Rules
-
-Split on any character **not allowed above**, with exceptions below.
-
----
-
-## 5.6 Special Handling Rules
-
-### 6.1 Apostrophes (keep)
-
-* `"don't"` → `"don't"`
-* `"it's"` → `"it's"`
-
-But:
-
-* leading/trailing `'` removed
-
----
-
-### 6.2 Dots (`.`)
-
-Keep **only if inside token**:
-
-```id="dots"
-"node.js" → ["node.js"]
-"example.com" → ["example.com"]
+```
+"Rust is GREAT"  →  ["rust", "is", "great"]
 ```
 
-Split if:
+### 5. Tokenization
 
-* leading or trailing
-* repeated punctuation
+#### Allowed token characters
 
-```id="dots2"
-"hello." → ["hello"]
-"...hi..." → ["hi"]
+A token is built from any run of these characters:
+
+```
+a–z   0–9   '   +   #   .   -
 ```
 
----
+A boundary is any other character. Whitespace, commas, parentheses, etc. all split tokens.
 
-### 6.3 Plus (`+`)
+#### Special character rules
 
-Preserve:
+**Apostrophes** are kept inside a token; leading and trailing apostrophes are stripped.
 
-```id="plus"
-"C++" → ["c++"]
+```
+"don't"   →  ["don't"]
+"'hello'" →  ["hello"]
 ```
 
----
+**Dots** are kept inside a token; leading, trailing, and runs are stripped.
 
-### 6.4 Hash (`#`)
-
-Preserve:
-
-```id="hash"
-"C#" → ["c#"]
+```
+"node.js"     →  ["node.js"]
+"example.com" →  ["example.com"]
+"hello."      →  ["hello"]
+"...hi..."    →  ["hi"]
 ```
 
----
+**Plus** is preserved.
 
-### 6.5 Hyphen (`-`)
-
-Rule:
-
-* preserve hyphenated tokens only if they match specific technical patterns
-* split all other hyphenated phrases
-
-```id="hyphen"
-"gpt-4" → ["gpt-4"]
-"state-of-the-art" → ["state", "of", "the", "art"]
+```
+"C++"  →  ["c++"]
 ```
 
-Preserved patterns (kept as single token):
+**Hash** is preserved.
 
-```id="hyphen2"
-"gpt-4" → ["gpt-4"]
-"x86-64" → ["x86-64"]
-"arm64-v8a" → ["arm64-v8a"]
-"es2015" → ["es2015"]
+```
+"C#"  →  ["c#"]
 ```
 
-Split patterns (broken into separate tokens):
+**Hyphens** are conditional. A hyphenated token is kept as one token only if it matches a "technical identifier" shape — version strings and architectures. Otherwise it splits.
 
-```id="hyphen3"
-"state-of-the-art" → ["state", "of", "the", "art"]
-"machine-learning" → ["machine", "learning"]
-"self-driving" → ["self", "driving"]
+```
+"gpt-4"            →  ["gpt-4"]
+"x86-64"           →  ["x86-64"]
+"arm64-v8a"        →  ["arm64-v8a"]
+"machine-learning" →  ["machine", "learning"]
+"state-of-the-art" →  ["state", "of", "the", "art"]
 ```
 
-Heuristic (regex-style):
+The technical-hyphen heuristic, taken verbatim from the implementation:
 
-Preserve as single token if:
-
-* `^[a-z]+[0-9]+-[a-z0-9]+$` (e.g., `gpt-4`, `arm64-v8a`)
-* `^[a-z0-9]+-[0-9]+$` (e.g., `python-3`, `v8-10`)
-* `^[a-z]{1,4}[0-9]+-[0-9]+$` (e.g., `x86-64`, `es2015-2020`)
-
-Otherwise split on hyphens.
-
-Rationale:
-
-* Technical identifiers (versions, architectures) should stay intact
-* Natural language hyphenation should split to capture component words
-* Edge cases will exist; consistency matters more than perfection
-
----
-
-### 6.6 URLs
-
-Detect URLs and extract domain only. Discard path segments.
-
-```id="url"
-"https://example.com/foo/bar"
-→ ["example.com"]
-
-"Check out github.com/rust-lang/rust"
-→ ["check", "out", "github.com"]
+```regex
+^(?:[a-z]+[0-9]+-[a-z0-9]+|[a-z0-9]+-[0-9]+|[a-z]{1,4}[0-9]+-[0-9]+)$
 ```
 
-Rationale:
+This catches `gpt-4`, `python-3`, `x86-64`, `es2015-2020`, and similar. It misses some technical compounds (`big-data`, `front-end`) and over-splits some natural-language hyphens, but the line is consistent and stable. Edge cases will exist; consistency matters more than perfection.
 
-* Path segments create misleading n-grams (e.g., `foo bar` from `/foo/bar`)
-* Users rarely search for URL path components
-* Domain names are meaningful and searchable
+**Numbers** are kept as-is, including when followed by letters.
 
-URL detection heuristic:
-
-* Match `https?://[^\s]+`
-* Match `[a-z0-9-]+\.(com|org|net|io|dev|ai|co|app)[^\s]*`
-
-Extract only the domain portion. Discard protocol, path, query string, and fragment.
-
----
-
-### 6.7 Numbers
-
-Keep as tokens:
-
-```id="numbers"
-"GPT-4 is 10x better"
-→ ["gpt-4", "is", "10x", "better"]
+```
+"GPT-4 is 10x better"  →  ["gpt-4", "is", "10x", "better"]
 ```
 
----
+**Empty tokens and tokens with no alphanumeric content** are discarded after boundary-stripping.
 
-### 6.8 Remove Empty Tokens
+## Worked examples
 
-Always discard:
+These are the ground-truth tests that gate every release of the tokenizer:
 
-* empty strings
-* tokens of length 0
-
----
-
-## 6. 🔢 Examples (Ground Truth)
-
-### Example 1
-
-```id="ex1"
-"Mr. Right? I don't know..."
-→ ["mr", "right", "i", "don't", "know"]
+```
+"Mr. Right? I don't know..."        →  ["mr", "right", "i", "don't", "know"]
+"C++ vs Rust vs Go"                 →  ["c++", "vs", "rust", "vs", "go"]
+"Node.js + React.js ecosystem"      →  ["node.js", "react.js", "ecosystem"]
+"Check https://example.com/test"    →  ["check", "example.com"]
+"State-of-the-art models"           →  ["state", "of", "the", "art", "models"]
 ```
 
----
+## How tokens become charts
 
-### Example 2
+Tokenization is one stage in a longer pipeline:
 
-```id="ex2"
-"C++ vs Rust vs Go"
-→ ["c++", "vs", "rust", "vs", "go"]
-```
+1. **Tokenize** each comment (this document).
+2. **Count n-grams** of order 1–3 per day. (RFC-002)
+3. **Prune** rare n-grams: bigrams below 20 global occurrences and trigrams below 10 are dropped at admission. The viewer is for trends, not for proving something was ever said.
+4. **Aggregate** at query time from daily buckets to monthly.
+5. **Normalize** to relative frequency: `count / total n-grams of the same order in that bucket`.
+6. **Smooth** in the client with a centered moving average (the slider; 0 = raw).
 
----
+The y-axis on every chart is that ratio in step 5. Two phrases on the same chart are directly comparable because they share denominators of the same n-gram order.
 
-### Example 3
-
-```id="ex3"
-"Node.js + React.js ecosystem"
-→ ["node.js", "react.js", "ecosystem"]
-```
-
----
-
-### Example 4
-
-```id="ex4"
-"Check https://example.com/test"
-→ ["check", "example.com"]
-```
-
----
-
-### Example 5
-
-```id="ex5"
-"State-of-the-art models"
-→ ["state", "of", "the", "art", "models"]
-```
-
----
-
-## 7. ⚡ Performance Requirements
-
-* Must process **millions of comments per minute**
-* Streaming-friendly (no full buffering required)
-* Parallelizable across threads
-
----
-
-## 8. 🧪 Testing Strategy
-
-### 8.1 Golden tests
-
-* fixed input → exact token output
-
-### 8.2 Edge cases
-
-* punctuation-heavy strings
-* code snippets
-* malformed HTML
-
-### 8.3 Regression safety
-
-* tokenizer version must be versioned
-* any change requires full re-index or version fork
-
----
-
-## 9. 🔒 Versioning
+## Versioning
 
 Defined in `server/crates/tokenizer/src/lib.rs`:
 
@@ -367,72 +174,15 @@ Defined in `server/crates/tokenizer/src/lib.rs`:
 pub const TOKENIZER_VERSION: u8 = 1;
 ```
 
-Stored in ClickHouse as `LowCardinality(String)` (e.g., `"1"`) to allow future semantic versioning.
+Stored alongside every count row in ClickHouse as `LowCardinality(String)`. Any change to the rules above must increment this version. Old data stays tagged with its original version and is never silently re-interpreted under new rules.
 
-Future changes:
+## Performance
 
-* must increment version
-* must not silently alter historical data
-* requires full re-index or parallel corpus version
+The tokenizer processes the full HN corpus (40M+ comments) on a single machine in under an hour. The pipeline is streaming and parallel — there's no full-corpus buffer step.
 
----
+## Implementation notes
 
-## 10. 🚧 Open Questions
-
-### Q1: Case sensitivity toggle?
-
-* v1: no (lowercase only)
-
-### Q2: Preserve camelCase?
-
-* likely no in v1
-
-### Q3: Emoji handling?
-
-* ignore for now
-
----
-
-## 11. 🧠 Key Design Tradeoff
-
-We explicitly choose:
-
-> **Consistency over linguistic correctness**
-
-This means:
-
-* “Mr. Right” is not treated as a named entity
-* punctuation ambiguity is ignored
-* results are stable and comparable over time
-
----
-
-## 12. ✅ Acceptance Criteria
-
-* Given any input string, tokenizer produces deterministic output
-* Matches all examples above
-* Handles HN-style technical text correctly
-* No dependency on external NLP libraries
-
----
-
-## 🧭 Final Recommendation
-
-This spec is intentionally:
-
-* simple
-* strict
-* slightly “dumb”
-
-That is **exactly what you want** for an n-gram viewer.
-
----
-
-## Implementation Notes
-
-- All 23 ground truth tests pass
-- Technical hyphen regex: `^(?:[a-z]+[0-9]+-[a-z0-9]+|[a-z0-9]+-[0-9]+|[a-z]{1,4}[0-9]+-[0-9]+)$`
-- URL extraction replaces full URL with domain only, wrapped in spaces
-- Uses `html-escape` crate for HTML entity decoding
-- Uses `unicode-normalization` crate for NFKC
-
+- HTML entity decoding via the `html-escape` crate.
+- NFKC via `unicode-normalization`.
+- Three URL regexes: one with protocol, one without (path-required to avoid double-matching bare domains), and one to extract the domain from a matched URL.
+- All examples in this document correspond to tests in `server/crates/tokenizer/src/lib.rs` and run on every CI build.
