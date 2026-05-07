@@ -1,24 +1,29 @@
-//! Sharded binary partial file I/O and parallel merge for ingest.
+//! Sharded binary partial file I/O and streaming merge for ingest.
 //!
 //! During source processing, n-gram counts are flushed to sharded binary partial
 //! files. Each entry is routed to a shard by `hash(key) % num_shards`, guaranteeing
 //! all occurrences of a given key land in the same shard.
 //!
-//! At merge time, each shard is processed independently in parallel (rayon),
-//! aggregating counts into a HashMap. Globals and totals are derived from counts.
+//! At merge time, shards are processed sequentially via
+//! `merge_shards_streaming` (RFC-010): each shard's HashMap is built, handed
+//! to a callback, and dropped before the next shard starts. This bounds peak
+//! RAM to a single shard regardless of corpus size.
 //!
 //! Binary record format (counts):
 //!   [bucket_len:u16][bucket:bytes][n:u8][ngram_len:u16][ngram:bytes][count:u32]
 
 use anyhow::Context;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokenizer::counter::NgramKey;
+
+#[cfg(test)]
+use rayon::prelude::*;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
 // Directory and path helpers
@@ -273,11 +278,47 @@ fn read_shard_file(
     Ok(())
 }
 
-/// Merge all sharded partial files in parallel.
+/// Stream-merge sharded partial files one shard at a time.
 ///
-/// Returns one HashMap per shard. Shards are disjoint by key, so no
-/// cross-shard aggregation is needed.
-pub fn merge_shards_parallel(
+/// For each shard, reads all its partial files into a single HashMap, hands
+/// that HashMap to the callback, and drops it before starting the next shard.
+/// This bounds peak RAM to one shard's deduplicated data, regardless of
+/// how many shards exist (RFC-010).
+///
+/// Sequential by design — parallelism here would defeat the memory bound.
+pub fn merge_shards_streaming<F>(
+    data_dir: &Path,
+    num_shards: usize,
+    label: &str,
+    mut on_shard: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(usize, HashMap<NgramKey, u32>) -> anyhow::Result<()>,
+{
+    for shard in 0..num_shards {
+        let files = find_shard_files(data_dir, shard, num_shards)?;
+        let mut map: HashMap<NgramKey, u32> = HashMap::new();
+        let mut bucket_intern: HashMap<String, Arc<str>> = HashMap::new();
+
+        for file in &files {
+            read_shard_file(file, &mut map, &mut bucket_intern)?;
+        }
+
+        tracing::info!("  {}: {}/{} shards complete", label, shard + 1, num_shards);
+
+        on_shard(shard, map)?;
+        // map dropped here, before next shard starts
+    }
+    Ok(())
+}
+
+/// Parallel-merge sharded partial files, returning one HashMap per shard.
+///
+/// Kept for one PR cycle as a `#[cfg(test)]` baseline for the RFC-010
+/// validation harness — production code uses `merge_shards_streaming` to
+/// bound peak RAM.
+#[cfg(test)]
+pub(crate) fn merge_shards_parallel(
     data_dir: &Path,
     num_shards: usize,
 ) -> anyhow::Result<Vec<HashMap<NgramKey, u32>>> {
@@ -301,6 +342,118 @@ pub fn merge_shards_parallel(
         })
         .collect();
 
-    // Collect results, propagating any errors
     results.into_iter().collect()
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokenizer::counter::NgramKey;
+
+    fn key(bucket: &str, n: u8, ngram: &str) -> NgramKey {
+        NgramKey {
+            bucket: Arc::from(bucket),
+            n,
+            ngram: ngram.to_string(),
+        }
+    }
+
+    /// Synthetic test fixture: write `partial_count` partial files, each with
+    /// the same set of (bucket, n, ngram, count) entries. Exercises the merge.
+    fn write_synthetic_partials(
+        data_dir: &Path,
+        partial_count: u32,
+        num_shards: usize,
+        entries_per_partial: &[(NgramKey, u32)],
+    ) -> anyhow::Result<()> {
+        std::fs::create_dir_all(partial_dir(data_dir))?;
+        for partial_idx in 0..partial_count {
+            let mut counts: HashMap<NgramKey, u32> = HashMap::new();
+            for (k, v) in entries_per_partial {
+                counts.insert(k.clone(), *v);
+            }
+            write_sharded(data_dir, partial_idx, num_shards, &counts)?;
+        }
+        Ok(())
+    }
+
+    /// RFC-010 §6.2: byte-for-byte invariant. The streaming merge must
+    /// produce the same aggregated entries as the parallel merge.
+    #[test]
+    fn streaming_merge_matches_parallel() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let data_dir = tmp.path();
+        let num_shards = 4;
+        let partial_count = 3;
+
+        let entries = vec![
+            (key("2024-01-01", 1, "rust"), 5u32),
+            (key("2024-01-01", 1, "go"), 3),
+            (key("2024-01-01", 2, "rust is"), 2),
+            (key("2024-02-01", 1, "rust"), 7),
+            (key("2024-02-01", 1, "python"), 4),
+            (key("2024-02-01", 3, "rust is fast"), 1),
+        ];
+
+        write_synthetic_partials(data_dir, partial_count, num_shards, &entries)?;
+
+        // Reference: parallel merge
+        let parallel_maps = merge_shards_parallel(data_dir, num_shards)?;
+        let mut parallel_total: HashMap<NgramKey, u32> = HashMap::new();
+        for shard_map in parallel_maps {
+            for (k, v) in shard_map {
+                *parallel_total.entry(k).or_insert(0) += v;
+            }
+        }
+
+        // New: streaming merge
+        let mut streaming_total: HashMap<NgramKey, u32> = HashMap::new();
+        merge_shards_streaming(data_dir, num_shards, "Test", |_shard, shard_map| {
+            for (k, v) in shard_map {
+                *streaming_total.entry(k).or_insert(0) += v;
+            }
+            Ok(())
+        })?;
+
+        assert_eq!(
+            parallel_total, streaming_total,
+            "streaming merge produced different aggregate from parallel merge"
+        );
+
+        // Sanity: each entry's expected total = count_per_partial × partial_count
+        for (k, v) in &entries {
+            let expected = (*v as u64) * (partial_count as u64);
+            let actual = *streaming_total.get(k).unwrap_or(&0) as u64;
+            assert_eq!(actual, expected, "wrong total for {:?}", k);
+        }
+        Ok(())
+    }
+
+    /// Streaming merge calls callback exactly num_shards times, in order.
+    #[test]
+    fn streaming_merge_callback_order() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let data_dir = tmp.path();
+        let num_shards = 4;
+        write_synthetic_partials(
+            data_dir,
+            1,
+            num_shards,
+            &[(key("2024-01-01", 1, "x"), 1)],
+        )?;
+
+        let mut visited = Vec::new();
+        merge_shards_streaming(data_dir, num_shards, "Test", |shard, _map| {
+            visited.push(shard);
+            Ok(())
+        })?;
+
+        assert_eq!(visited, vec![0, 1, 2, 3]);
+        Ok(())
+    }
 }

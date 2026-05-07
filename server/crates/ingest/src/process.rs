@@ -511,77 +511,77 @@ async fn process_parquet(
     }
 
     // ================================================================
-    // Parallel merge: aggregate all shards
+    // Streaming merge: two passes over shard partials (RFC-010)
+    //   Pass 1 — build globals, vocabulary; write global_counts +
+    //            ngram_vocabulary parquet inline
+    //   Pass 2 — filter against vocabulary, write ngram_counts; accumulate
+    //            totals; write bucket_totals parquet
     // ================================================================
     let num_shards = proc_config.merge_shards;
-    tracing::info!("Merging {} shards in parallel...", num_shards);
     let merge_start = std::time::Instant::now();
 
-    let shard_maps = vocabulary::merge_shards_parallel(data_dir, num_shards)?;
-
-    tracing::info!("Shard merge complete in {:.1}s", merge_start.elapsed().as_secs_f64());
-
-    // ================================================================
-    // Derive globals → build vocabulary → write global_counts.parquet
-    // ================================================================
-    tracing::info!("Deriving globals and building vocabulary...");
+    // ---------- Pass 1: build globals ----------
+    tracing::info!("Pass 1: building globals from {} shards...", num_shards);
 
     let mut globals: HashMap<(u8, String), u64> = HashMap::new();
-    for (i, shard_map) in shard_maps.iter().enumerate() {
-        for (key, &count) in shard_map {
+    vocabulary::merge_shards_streaming(data_dir, num_shards, "Pass 1", |_shard, shard_map| {
+        for (key, &count) in &shard_map {
             *globals.entry((key.n, key.ngram.clone())).or_insert(0) += count as u64;
         }
-        tracing::info!("  Deriving globals: {}/{} shards", i + 1, num_shards);
-    }
+        Ok(())
+    })?;
 
     let vocabulary = build_vocabulary(&globals, &config);
     tracing::info!("Vocabulary built — {} admitted entries", vocabulary.len());
 
+    // Walk globals once: write to global_counts.parquet AND inline-write to
+    // ngram_vocabulary.parquet for admitted entries (RFC-010 §2.4 — no
+    // intermediate vocab_counts hashmap).
     let gc_path = output_dir.join("global_counts.parquet");
     let mut gc_writer = parquet_writer::GlobalCountsWriter::new(&gc_path)?;
+    let vocab_path = output_dir.join("ngram_vocabulary.parquet");
+    let mut vocab_writer = parquet_writer::VocabularyWriter::new(&vocab_path)?;
+
     let mut total_gc_rows = 0u64;
     let mut total_unigrams = 0u64;
     let mut total_bigrams = 0u64;
     let mut total_trigrams = 0u64;
+    let mut total_vocab_rows = 0u64;
     let min_gc_export = config.min_global_export();
     let globals_total = globals.len() as u64;
     let mut skipped = 0u64;
     let mut last_pct = 0u8;
+    let now = time::OffsetDateTime::now_utc();
 
     tracing::info!("  Filtering global_counts with min_global_export={}", min_gc_export);
 
-    let mut vocab_counts: HashMap<(u8, String), u64> = HashMap::new();
     for ((n, ngram), &count) in &globals {
-        // Skip n-grams that can never pass any threshold
         if count < min_gc_export {
             skipped += 1;
-            // Still track progress against total
-            if globals_total > 0 {
-                let done = total_gc_rows + skipped;
-                let pct = (done * 100 / globals_total).min(100) as u8;
-                let bucket = pct / 10 * 10;
-                if bucket > last_pct && bucket < 100 {
-                    last_pct = bucket;
-                    tracing::info!("  Writing global_counts.parquet: {}%", bucket);
-                }
+        } else {
+            gc_writer.write_one(&GlobalCountRow {
+                tokenizer_version: tv.clone(),
+                n: *n,
+                ngram: ngram.clone(),
+                count,
+            })?;
+            total_gc_rows += 1;
+            match n {
+                1 => total_unigrams += 1,
+                2 => total_bigrams += 1,
+                3 => total_trigrams += 1,
+                _ => {}
             }
-            continue;
-        }
-        gc_writer.write_one(&GlobalCountRow {
-            tokenizer_version: tv.clone(),
-            n: *n,
-            ngram: ngram.clone(),
-            count,
-        })?;
-        total_gc_rows += 1;
-        match n {
-            1 => total_unigrams += 1,
-            2 => total_bigrams += 1,
-            3 => total_trigrams += 1,
-            _ => {}
-        }
-        if vocabulary.contains_key(&(*n, ngram.clone())) {
-            vocab_counts.insert((*n, ngram.clone()), count);
+            if vocabulary.contains_key(&(*n, ngram.clone())) {
+                vocab_writer.write_one(&NgramVocabularyRow {
+                    tokenizer_version: tv.clone(),
+                    n: *n,
+                    ngram: ngram.clone(),
+                    global_count: count,
+                    admitted_at: now,
+                })?;
+                total_vocab_rows += 1;
+            }
         }
         if globals_total > 0 {
             let done = total_gc_rows + skipped;
@@ -594,10 +594,14 @@ async fn process_parquet(
         }
     }
     gc_writer.finish()?;
+    vocab_writer.finish()?;
+
     tracing::info!(
         "  Exported {} global count rows, skipped {} below threshold",
         total_gc_rows, skipped,
     );
+
+    // Drop globals before Pass 2 — only `vocabulary` is needed downstream.
     drop(globals);
 
     let admitted_bigrams = vocabulary.iter().filter(|((n, _), _)| *n == 2).count();
@@ -612,21 +616,19 @@ async fn process_parquet(
         admitted_bigrams, total_bigrams, admitted_trigrams, total_trigrams,
     );
     tracing::info!("Wrote {} global count rows to parquet", total_gc_rows);
+    tracing::info!("Wrote {} vocabulary rows", total_vocab_rows);
 
-    // ================================================================
-    // Filter counts → ngram_counts.parquet + derive totals → bucket_totals.parquet
-    // ================================================================
-    tracing::info!("Writing ngram_counts.parquet and bucket_totals.parquet...");
+    // ---------- Pass 2: filter shards, write counts + totals ----------
+    tracing::info!("Pass 2: filtering and writing ngram_counts.parquet...");
 
     let counts_path = output_dir.join("ngram_counts.parquet");
     let mut counts_writer = parquet_writer::NgramCountsWriter::new(&counts_path)?;
     let mut total_count_rows = 0u64;
     let mut max_ts: i64 = 0;
-
     let mut totals: HashMap<BucketKey, u64> = HashMap::new();
 
-    for (i, shard_map) in shard_maps.iter().enumerate() {
-        for (key, &count) in shard_map {
+    vocabulary::merge_shards_streaming(data_dir, num_shards, "Pass 2", |_shard, shard_map| {
+        for (key, &count) in &shard_map {
             // Accumulate unpruned totals (denominators must remain unpruned)
             let total_key = BucketKey {
                 bucket: key.bucket.clone(),
@@ -634,7 +636,7 @@ async fn process_parquet(
             };
             *totals.entry(total_key).or_insert(0) += count as u64;
 
-            // Filter: unigrams always admitted, bigrams/trigrams need vocabulary check
+            // Filter: unigrams always admitted, n>=2 needs vocabulary check
             let admitted = if key.n == 1 {
                 count >= config.min_bucket_count(1)
             } else {
@@ -654,14 +656,17 @@ async fn process_parquet(
                 total_count_rows += 1;
             }
         }
-        tracing::info!("  Filtering counts: {}/{} shards", i + 1, num_shards);
-    }
+        Ok(())
+    })?;
 
     counts_writer.finish()?;
-    drop(shard_maps);
     tracing::info!("Wrote {} ngram count rows to parquet", total_count_rows);
+    tracing::info!(
+        "Both merge passes complete in {:.1}s",
+        merge_start.elapsed().as_secs_f64()
+    );
 
-    // Write bucket_totals.parquet from derived totals
+    // Write bucket_totals.parquet from accumulated totals
     let totals_path = output_dir.join("bucket_totals.parquet");
     let mut totals_writer = parquet_writer::BucketTotalsWriter::new(&totals_path)?;
     let mut total_total_rows = 0u64;
@@ -686,24 +691,8 @@ async fn process_parquet(
     tracing::info!("Wrote {} bucket total rows to parquet", total_total_rows);
 
     // ================================================================
-    // Write vocabulary + ingest_log parquet
+    // Write ingest_log.parquet
     // ================================================================
-
-    let now = time::OffsetDateTime::now_utc();
-    let vocab_rows: Vec<NgramVocabularyRow> = vocab_counts
-        .iter()
-        .map(|((n, ngram), &gc)| NgramVocabularyRow {
-            tokenizer_version: tv.clone(),
-            n: *n,
-            ngram: ngram.clone(),
-            global_count: gc,
-            admitted_at: now,
-        })
-        .collect();
-
-    let vocab_path = output_dir.join("ngram_vocabulary.parquet");
-    parquet_writer::write_vocabulary_parquet(&vocab_path, &vocab_rows)?;
-    tracing::info!("Wrote {} vocabulary rows", vocab_rows.len());
 
     let duration = run_start.elapsed();
     let log_row = IngestLogRow {
@@ -713,7 +702,7 @@ async fn process_parquet(
         comments_processed: 0,
         ngram_counts_inserted: total_count_rows,
         bucket_totals_inserted: total_total_rows,
-        vocabulary_inserted: vocab_rows.len() as u64,
+        vocabulary_inserted: total_vocab_rows,
         start_month: start.to_string(),
         end_month: end.to_string(),
         duration_ms: duration.as_millis() as u64,
@@ -878,61 +867,8 @@ mod parquet_writer {
     }
 
     // ====================================================================
-    // One-shot writers (for small tables written all at once)
+    // Streaming writers (used during the merge passes)
     // ====================================================================
-
-    pub fn write_vocabulary_parquet(
-        path: &Path,
-        rows: &[NgramVocabularyRow],
-    ) -> anyhow::Result<()> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("tokenizer_version", DataType::Utf8, false),
-            Field::new("n", DataType::UInt8, false),
-            Field::new("ngram", DataType::Utf8, false),
-            Field::new("global_count", DataType::UInt64, false),
-            Field::new(
-                "admitted_at",
-                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-                false,
-            ),
-        ]));
-
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("Failed to create {}", path.display()))?;
-        let mut writer = ArrowWriter::try_new(file, schema, Some(writer_props()))?;
-
-        if !rows.is_empty() {
-            let mut tv = StringBuilder::with_capacity(rows.len(), rows.len() * 2);
-            let mut n = UInt8Builder::with_capacity(rows.len());
-            let mut ngram = StringBuilder::with_capacity(rows.len(), rows.len() * 16);
-            let mut global_count = UInt64Builder::with_capacity(rows.len());
-            let mut admitted_at =
-                TimestampMillisecondBuilder::with_capacity(rows.len()).with_timezone("UTC");
-
-            for row in rows {
-                tv.append_value(&row.tokenizer_version);
-                n.append_value(row.n);
-                ngram.append_value(&row.ngram);
-                global_count.append_value(row.global_count);
-                // Convert OffsetDateTime to millis since epoch
-                let ms = (row.admitted_at.unix_timestamp_nanos() / 1_000_000) as i64;
-                admitted_at.append_value(ms);
-            }
-
-            let batch = RecordBatch::try_from_iter(vec![
-                ("tokenizer_version", Arc::new(tv.finish()) as _),
-                ("n", Arc::new(n.finish()) as _),
-                ("ngram", Arc::new(ngram.finish()) as _),
-                ("global_count", Arc::new(global_count.finish()) as _),
-                ("admitted_at", Arc::new(admitted_at.finish()) as _),
-            ])?;
-
-            writer.write(&batch)?;
-        }
-
-        writer.close()?;
-        Ok(())
-    }
 
     pub struct GlobalCountsWriter {
         writer: ArrowWriter<std::fs::File>,
@@ -988,6 +924,83 @@ mod parquet_writer {
                 ("n", Arc::new(self.buf_n.finish()) as _),
                 ("ngram", Arc::new(self.buf_ngram.finish()) as _),
                 ("count", Arc::new(self.buf_count.finish()) as _),
+            ])?;
+            self.writer.write(&batch)?;
+            self.buf_len = 0;
+            Ok(())
+        }
+
+        pub fn finish(mut self) -> anyhow::Result<()> {
+            self.flush_buf()?;
+            self.writer.close()?;
+            Ok(())
+        }
+    }
+
+    pub struct VocabularyWriter {
+        writer: ArrowWriter<std::fs::File>,
+        buf_tv: StringBuilder,
+        buf_n: UInt8Builder,
+        buf_ngram: StringBuilder,
+        buf_global_count: UInt64Builder,
+        buf_admitted_at: TimestampMillisecondBuilder,
+        buf_len: usize,
+    }
+
+    const VOCAB_FLUSH_SIZE: usize = 65536;
+
+    impl VocabularyWriter {
+        pub fn new(path: &Path) -> anyhow::Result<Self> {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("tokenizer_version", DataType::Utf8, false),
+                Field::new("n", DataType::UInt8, false),
+                Field::new("ngram", DataType::Utf8, false),
+                Field::new("global_count", DataType::UInt64, false),
+                Field::new(
+                    "admitted_at",
+                    DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                    false,
+                ),
+            ]));
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("Failed to create {}", path.display()))?;
+            let writer = ArrowWriter::try_new(file, schema, Some(writer_props()))?;
+            Ok(Self {
+                writer,
+                buf_tv: StringBuilder::new(),
+                buf_n: UInt8Builder::new(),
+                buf_ngram: StringBuilder::new(),
+                buf_global_count: UInt64Builder::new(),
+                buf_admitted_at: TimestampMillisecondBuilder::new().with_timezone("UTC"),
+                buf_len: 0,
+            })
+        }
+
+        pub fn write_one(&mut self, row: &NgramVocabularyRow) -> anyhow::Result<()> {
+            self.buf_tv.append_value(&row.tokenizer_version);
+            self.buf_n.append_value(row.n);
+            self.buf_ngram.append_value(&row.ngram);
+            self.buf_global_count.append_value(row.global_count);
+            let ms = (row.admitted_at.unix_timestamp_nanos() / 1_000_000) as i64;
+            self.buf_admitted_at.append_value(ms);
+            self.buf_len += 1;
+
+            if self.buf_len >= VOCAB_FLUSH_SIZE {
+                self.flush_buf()?;
+            }
+            Ok(())
+        }
+
+        fn flush_buf(&mut self) -> anyhow::Result<()> {
+            if self.buf_len == 0 {
+                return Ok(());
+            }
+            let batch = RecordBatch::try_from_iter(vec![
+                ("tokenizer_version", Arc::new(self.buf_tv.finish()) as _),
+                ("n", Arc::new(self.buf_n.finish()) as _),
+                ("ngram", Arc::new(self.buf_ngram.finish()) as _),
+                ("global_count", Arc::new(self.buf_global_count.finish()) as _),
+                ("admitted_at", Arc::new(self.buf_admitted_at.finish()) as _),
             ])?;
             self.writer.write(&batch)?;
             self.buf_len = 0;

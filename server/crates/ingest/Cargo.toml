@@ -42,3 +42,6 @@ futures-util = "0.3"
 
 # Parallelism
 rayon = "1"
+
+[dev-dependencies]
+tempfile = "3"
