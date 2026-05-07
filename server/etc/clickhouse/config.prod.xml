@@ -2,6 +2,12 @@
 <clickhouse>
     <!-- Prod tuning for small VPS (per RFC-003 Section 12) -->
 
+    <!-- Override config.xml's 0.6 ratio: with the full-profile dataset
+         (317M rows, ~73k parts pre-optimize) idle metadata alone fills
+         ~60% of RAM, leaving no room for queries. 0.85 + swap headroom
+         is workable on this 3.7GB box; lower if RSS pressure shows up. -->
+    <max_server_memory_usage_to_ram_ratio>0.85</max_server_memory_usage_to_ram_ratio>
+
     <!-- Background thread pools: minimal for 1-2 cores -->
     <background_pool_size>2</background_pool_size>
     <background_schedule_pool_size>2</background_schedule_pool_size>
