@@ -18,10 +18,7 @@ export default defineConfig({
         target: 'http://localhost:3000',
         pathRewrite: { '^/api': '' },
       },
-      '/swagger-ui': {
-        target: 'http://localhost:3000',
-      },
-      '/api-doc': {
+      '/scalar': {
         target: 'http://localhost:3000',
       },
     },

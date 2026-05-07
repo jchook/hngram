@@ -12,12 +12,14 @@ pub use hn_clickhouse::{
     TOKENIZER_VERSION,
 };
 pub use serde::{Deserialize, Serialize};
+pub use serde_json::json;
 pub use std::sync::Arc;
 pub use time::macros::format_description;
 pub use time::Date;
 pub use tower::limit::ConcurrencyLimitLayer;
 pub use tower_http::{cors::CorsLayer, trace::TraceLayer};
 pub use utoipa::{IntoParams, OpenApi, ToSchema};
+pub use utoipa_scalar::{Scalar, Servable};
 
 // ============================================================================
 // OpenAPI Documentation
@@ -57,10 +59,7 @@ pub fn api_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/freshness", get(freshness))
         .route("/ngram", get(ngram))
-        .merge(
-            utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-                .url("/api-doc/openapi.json", ApiDoc::openapi()),
-        )
+        .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .layer(ConcurrencyLimitLayer::new(64))
@@ -73,8 +72,11 @@ pub fn api_router(state: Arc<AppState>) -> Router {
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
+    #[schema(example = "ok")]
     status: String,
+    #[schema(example = "0.1.0")]
     version: String,
+    #[schema(example = "1")]
     tokenizer_version: String,
 }
 
@@ -100,9 +102,12 @@ pub async fn health() -> Json<HealthResponse> {
 #[derive(Serialize, ToSchema)]
 pub struct FreshnessResponse {
     /// Date of the most recent comment ingested (YYYY-MM-DD), or null if no data.
+    #[schema(example = "2026-04-30")]
     last_ingested_date: Option<String>,
     /// Unix timestamp in milliseconds for the most recent comment ingested, or null.
+    #[schema(example = 1745977200000_i64)]
     last_ingested_ts: Option<i64>,
+    #[schema(example = "1")]
     tokenizer_version: String,
 }
 
@@ -145,16 +150,38 @@ pub async fn freshness(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct QueryParams {
     /// Single phrase to query
+    #[param(example = "rust programming")]
     phrase: String,
     /// Start date (YYYY-MM-DD). Default: 2011-01-01
+    #[param(example = "2020-01-01")]
     start: Option<String>,
     /// End date (YYYY-MM-DD). Default: today
+    #[param(example = "2024-12-01")]
     end: Option<String>,
     /// Time granularity: day, week, month, year. Default: month
+    #[param(example = "month")]
     granularity: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(example = json!({
+    "phrase": "rust programming",
+    "normalized": "rust programming",
+    "status": "indexed",
+    "points": [
+        {"t": "2020-01-01", "v": 0.0000812, "count": 98,  "total": 1206897},
+        {"t": "2020-07-01", "v": 0.0001034, "count": 124, "total": 1199226},
+        {"t": "2021-01-01", "v": 0.0001305, "count": 159, "total": 1218391},
+        {"t": "2024-06-01", "v": 0.0001501, "count": 187, "total": 1245836}
+    ],
+    "global_count": 18432,
+    "meta": {
+        "tokenizer_version": "1",
+        "start": "2020-01-01",
+        "end": "2024-12-01",
+        "granularity": "month"
+    }
+}))]
 pub struct QueryResponse {
     /// Original phrase from input
     phrase: String,
@@ -171,14 +198,19 @@ pub struct QueryResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct QueryMeta {
+    #[schema(example = "1")]
     tokenizer_version: String,
+    #[schema(example = "2020-01-01")]
     start: String,
+    #[schema(example = "2024-12-01")]
     end: String,
+    #[schema(example = "month")]
     granularity: String,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[schema(example = "indexed")]
 pub enum SeriesStatus {
     /// Phrase is in vocabulary, data returned
     Indexed,
@@ -191,12 +223,16 @@ pub enum SeriesStatus {
 #[derive(Serialize, ToSchema)]
 pub struct Point {
     /// Bucket timestamp (YYYY-MM-DD)
+    #[schema(example = "2024-06-01")]
     t: String,
     /// Relative frequency (count / total_count)
+    #[schema(example = 0.0001501)]
     v: f64,
     /// Raw occurrence count for this phrase in this bucket
+    #[schema(example = 187)]
     count: u64,
     /// Total n-grams of this order in this bucket
+    #[schema(example = 1245836)]
     total: u64,
 }
 
@@ -205,13 +241,21 @@ pub struct Point {
 // ============================================================================
 
 #[derive(Serialize, ToSchema)]
+#[schema(example = json!({
+    "error": {
+        "code": "INVALID_DATE_FORMAT",
+        "message": "Invalid start date '2020/01/01', expected YYYY-MM-DD"
+    }
+}))]
 pub struct ErrorResponse {
     error: ErrorDetail,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct ErrorDetail {
+    #[schema(example = "INVALID_DATE_FORMAT")]
     code: String,
+    #[schema(example = "Invalid start date '2020/01/01', expected YYYY-MM-DD")]
     message: String,
 }
 

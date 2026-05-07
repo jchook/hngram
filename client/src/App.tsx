@@ -110,7 +110,7 @@ export default function App() {
         <nav className="hn-footer-links">
           <a href="https://github.com/jchook/hngram" target="_blank" rel="noopener noreferrer">GitHub</a>
           <span aria-hidden="true">|</span>
-          <a href="/swagger-ui/" target="_blank" rel="noopener noreferrer">API</a>
+          <a href="/scalar" target="_blank" rel="noopener noreferrer">API</a>
           <span aria-hidden="true">|</span>
           <a href="https://huggingface.co/datasets/open-index/hacker-news" target="_blank" rel="noopener noreferrer">Dataset</a>
           <span aria-hidden="true">|</span>

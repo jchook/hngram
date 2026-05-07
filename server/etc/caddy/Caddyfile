@@ -23,12 +23,8 @@
         reverse_proxy api:3000
     }
 
-    # Proxy OpenAPI spec and Swagger UI
-    handle /swagger-ui* {
-        reverse_proxy api:3000
-    }
-
-    handle /api-doc/* {
+    # Proxy Scalar API explorer
+    handle /scalar* {
         reverse_proxy api:3000
     }
 
