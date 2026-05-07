@@ -7,7 +7,7 @@ html, body {
 
 .hn-header {
   background: #ff6600;
-  padding: 2px 6px;
+  padding: 2px;
   display: flex;
   align-items: center;
   font-size: 10pt;
