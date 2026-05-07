@@ -14,9 +14,15 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': {
+      '/api/': {
         target: 'http://localhost:3000',
         pathRewrite: { '^/api': '' },
+      },
+      '/swagger-ui': {
+        target: 'http://localhost:3000',
+      },
+      '/api-doc': {
+        target: 'http://localhost:3000',
       },
     },
   },
