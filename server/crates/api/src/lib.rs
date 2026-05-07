@@ -25,9 +25,10 @@ pub use utoipa::{IntoParams, OpenApi, ToSchema};
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, ngram),
+    paths(health, ngram, freshness),
     components(schemas(
         HealthResponse,
+        FreshnessResponse,
         QueryParams,
         QueryResponse,
         QueryMeta,
@@ -54,6 +55,7 @@ pub struct AppState {
 pub fn api_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/freshness", get(freshness))
         .route("/ngram", get(ngram))
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
@@ -89,6 +91,49 @@ pub async fn health() -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         tokenizer_version: TOKENIZER_VERSION.to_string(),
     })
+}
+
+// ============================================================================
+// Freshness Endpoint
+// ============================================================================
+
+#[derive(Serialize, ToSchema)]
+pub struct FreshnessResponse {
+    /// Date of the most recent comment ingested (YYYY-MM-DD), or null if no data.
+    last_ingested_date: Option<String>,
+    /// Unix timestamp in milliseconds for the most recent comment ingested, or null.
+    last_ingested_ts: Option<i64>,
+    tokenizer_version: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/freshness",
+    responses(
+        (status = 200, description = "Data freshness info", body = FreshnessResponse)
+    )
+)]
+pub async fn freshness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let ts = state
+        .clickhouse
+        .get_latest_watermark()
+        .await
+        .ok()
+        .flatten();
+    let date = ts.and_then(|ms| {
+        time::OffsetDateTime::from_unix_timestamp(ms / 1000)
+            .ok()
+            .map(|dt| format_date(dt.date()))
+    });
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(FreshnessResponse {
+            last_ingested_date: date,
+            last_ingested_ts: ts,
+            tokenizer_version: TOKENIZER_VERSION.to_string(),
+        }),
+    )
 }
 
 // ============================================================================

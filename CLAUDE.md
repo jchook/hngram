@@ -53,6 +53,24 @@ cd client && just gen
 
 The `generate_openapi` binary lives at `server/crates/api/src/bin/generate_openapi.rs` and imports `ApiDoc` from the api crate's lib.
 
+#### Adding a new endpoint
+
+All four registration points live in `server/crates/api/src/lib.rs`. Miss any one and the endpoint won't show up in the spec or SDK:
+
+1. **Handler** — write the `async fn` and decorate it with `#[utoipa::path(get, path = "/foo", responses(...))]`.
+2. **`ApiDoc` paths** — add the function name to `paths(...)` in the `#[openapi(...)]` macro.
+3. **`ApiDoc` schemas** — add any new request/response types (those that derive `ToSchema`) to `components(schemas(...))`.
+4. **Router** — add `.route("/foo", get(foo))` in `api_router()`.
+
+Then regenerate:
+
+```bash
+cd server && just openapi    # writes server/openapi.json
+cd client && just gen        # writes client/src/gen/
+```
+
+The TanStack Query hook gets named after the Rust function (`fn foo` → `useFoo`), so avoid names that collide with library exports — see the "Endpoint naming affects SDK hook names" gotcha.
+
 ### Ingest pipeline
 
 Three subcommands: download raw data, process it, and (for bootstrap) import into ClickHouse.

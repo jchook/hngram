@@ -9,6 +9,24 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/freshness": {
+      "get": {
+        "tags": [],
+        "operationId": "freshness",
+        "responses": {
+          "200": {
+            "description": "Data freshness info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreshnessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [],
@@ -128,6 +146,32 @@
         "properties": {
           "error": {
             "$ref": "#/components/schemas/ErrorDetail"
+          }
+        }
+      },
+      "FreshnessResponse": {
+        "type": "object",
+        "required": [
+          "tokenizer_version"
+        ],
+        "properties": {
+          "last_ingested_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Date of the most recent comment ingested (YYYY-MM-DD), or null if no data."
+          },
+          "last_ingested_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp in milliseconds for the most recent comment ingested, or null."
+          },
+          "tokenizer_version": {
+            "type": "string"
           }
         }
       },
