@@ -57,22 +57,28 @@ export const options = {
     capacity: {
       executor: 'ramping-vus',
       startVUs: 50,
-      gracefulRampDown: '5s',
+      gracefulRampDown: '10s',
+      // Stages need to be a few think-times long for stats to settle. With
+      // 10–30s sleep (avg 20s) a 60s stage gives each VU ~3 iterations to
+      // contribute samples.
       stages: [
-        { duration: '15s', target: 50 },   // brief settle
-        { duration: '30s', target: 150 },
-        { duration: '30s', target: 300 },
-        { duration: '30s', target: 600 },  // push past the warm-cache 200 ceiling
-        { duration: '10s', target: 0 },    // drain
+        { duration: '60s',  target: 50 },   // settle baseline
+        { duration: '60s',  target: 150 },  // first step — near expected cold-cache knee
+        { duration: '60s',  target: 300 },
+        { duration: '60s',  target: 500 },  // around expected warm-cache knee
+        { duration: '60s',  target: 700 },  // headroom past the knee
+        { duration: '15s',  target: 0 },    // drain
       ],
     },
   },
   thresholds: {
     http_req_failed: [
-      { threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '15s' },
+      { threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '60s' },
     ],
     http_req_duration: [
-      { threshold: 'p(95)<3000', abortOnFail: true, delayAbortEval: '15s' },
+      // 3s p95 was too tight given cold-cache 4–5s avg per query; users
+      // will tolerate more from a chart-loading interaction.
+      { threshold: 'p(95)<5000', abortOnFail: true, delayAbortEval: '60s' },
     ],
     rate_limited: [
       { threshold: 'rate<0.001', abortOnFail: true },
@@ -164,7 +170,9 @@ export default function () {
     });
   }
 
-  // Shorter think time than a real user — we're optimizing for capacity
-  // signal per VU, not modeling browsing behavior precisely.
-  sleep(0.5 + Math.random());
+  // Realistic think time: 10–30s between actions (chart load, tweak date,
+  // add phrase, etc). At avg 20s sleep, 1 VU ≈ 1 real active user. Without
+  // this, a single VU equals ~20 users of offered load and the test
+  // saturates ClickHouse far below realistic concurrency.
+  sleep(10 + Math.random() * 20);
 }

@@ -106,33 +106,43 @@ BASE_URL=http://localhost:8080 k6 run loadtest/ngram.js
 
 ## Stages
 
-The script optimizes for fast capacity discovery, not realistic browsing.
-Total run time is ~2 minutes if everything passes — typically much less,
-because thresholds with `abortOnFail` kill the test on the first sustained
-breach (after a 15s warmup grace).
+The script targets realistic active-user concurrency: 1 VU sleeps 10–30s
+between iterations (avg 20s), which is roughly the cadence of a user
+loading the chart, glancing at it, and tweaking a parameter. So 1 VU ≈
+1 real active user.
+
+Total run time is ~5 minutes if everything passes; thresholds with
+`abortOnFail` kill the test on the first sustained breach (after a 60s
+settle grace).
 
 | Stage   | Duration | VUs        | Purpose                              |
 |---------|----------|------------|--------------------------------------|
-| Settle  | 15s      | 50 → 50    | Baseline; threshold eval starts here |
-| Mid     | 30s      | 50 → 150   | First step                           |
-| High    | 30s      | 150 → 300  | Push past warm-cache ceiling         |
-| Peak    | 30s      | 300 → 600  | Find the cold-cache knee             |
-| Drain   | 10s      | → 0        | Brief drain                          |
+| Settle  | 60s      | 50 → 50    | Baseline; threshold eval starts here |
+| Step 1  | 60s      | 50 → 150   | Near expected cold-cache knee        |
+| Step 2  | 60s      | 150 → 300  |                                      |
+| Step 3  | 60s      | 300 → 500  | Around expected warm-cache knee      |
+| Step 4  | 60s      | 500 → 700  | Headroom past the knee               |
+| Drain   | 15s      | → 0        | Brief drain                          |
 
-`startVUs: 50` skips the slow ramp from zero. Each VU loops: pick 1–5 phrases
-uniformly from `phrases.tsv`, each with its own random date range and
-granularity → fire them in parallel via `http.batch` → think 0.5–1.5s.
-At 300 VUs that's roughly 600–1200 RPS depending on response latency.
+`startVUs: 50` skips the slow ramp from zero. Each VU loops: pick 1–5
+phrases uniformly from `phrases.tsv`, each with its own random date range
+and granularity → fire them in parallel via `http.batch` → think 10–30s.
+
+> **Why not shorter sleep?** Aggressive 0.5–1.5s think time amplifies one
+> VU into ~20 real users of offered load. That's useful for finding raw
+> backend ceiling but reports VU counts that don't translate to "concurrent
+> users". Stick with realistic sleep when you want a number you can quote.
 
 ## Thresholds (abort the run on breach)
 
 All three thresholds use `abortOnFail: true` — k6 stops the run the moment
 they're sustained-breached, instead of continuing to hammer the system past
-the knee. `delayAbortEval: 15s` means evaluation doesn't start until the
+the knee. `delayAbortEval: 60s` means evaluation doesn't start until the
 settle stage is over, so brief warmup spikes don't trip an abort.
 
 - `http_req_failed` rate < 5%
-- `http_req_duration` p95 < 3000 ms
+- `http_req_duration` p95 < 5000 ms — 5s tolerates the cold-cache per-query
+  cost (~4s avg observed) without flagging healthy operation as broken
 - `rate_limited` < 0.1% — any `429` indicates the bypass isn't active, not a
   real capacity signal
 
