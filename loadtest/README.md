@@ -106,30 +106,40 @@ BASE_URL=http://localhost:8080 k6 run loadtest/ngram.js
 
 ## Stages
 
-| Stage   | Duration | VUs       | Purpose                                |
-|---------|----------|-----------|----------------------------------------|
-| Warmup  | 30s      | 0 → 10    | Prime caches, surface obvious errors   |
-| Low     | 1m       | 10 → 50   | Baseline                               |
-| Mid     | 2m       | 50 → 100  | Look for early degradation             |
-| High    | 2m       | 100 → 200 | Find the knee                          |
-| Drain   | 1m       | 200 → 0   | Watch recovery                         |
+The script optimizes for fast capacity discovery, not realistic browsing.
+Total run time is ~2 minutes if everything passes — typically much less,
+because thresholds with `abortOnFail` kill the test on the first sustained
+breach (after a 15s warmup grace).
 
-Each VU loops: pick 1–5 phrases uniformly from `phrases.tsv`, each with its
-own random date range and granularity → fire them in parallel via
-`http.batch` → think 2–5s. Effective load at 200 VUs is roughly 100–200 RPS
-depending on response latency.
+| Stage   | Duration | VUs        | Purpose                              |
+|---------|----------|------------|--------------------------------------|
+| Settle  | 15s      | 50 → 50    | Baseline; threshold eval starts here |
+| Mid     | 30s      | 50 → 150   | First step                           |
+| High    | 30s      | 150 → 300  | Push past warm-cache ceiling         |
+| Peak    | 30s      | 300 → 600  | Find the cold-cache knee             |
+| Drain   | 10s      | → 0        | Brief drain                          |
 
-## Thresholds (cause k6 to exit nonzero)
+`startVUs: 50` skips the slow ramp from zero. Each VU loops: pick 1–5 phrases
+uniformly from `phrases.tsv`, each with its own random date range and
+granularity → fire them in parallel via `http.batch` → think 0.5–1.5s.
+At 300 VUs that's roughly 600–1200 RPS depending on response latency.
 
-- `http_req_failed` rate < 2%
-- `http_req_duration` p95 < 2000 ms, p99 < 5000 ms
+## Thresholds (abort the run on breach)
+
+All three thresholds use `abortOnFail: true` — k6 stops the run the moment
+they're sustained-breached, instead of continuing to hammer the system past
+the knee. `delayAbortEval: 15s` means evaluation doesn't start until the
+settle stage is over, so brief warmup spikes don't trip an abort.
+
+- `http_req_failed` rate < 5%
+- `http_req_duration` p95 < 3000 ms
 - `rate_limited` < 0.1% — any `429` indicates the bypass isn't active, not a
   real capacity signal
 
-If the test fails on `rate_limited` first, fix the bypass before drawing
-conclusions about capacity. If it fails on `http_req_duration` or
-`http_req_failed`, that's the signal you're looking for — note the VU count
-at the moment of degradation.
+If the test aborts on `rate_limited`, fix the bypass before drawing
+conclusions about capacity. If it aborts on `http_req_duration` or
+`http_req_failed`, that's the signal — the VU count at abort time is your
+knee estimate.
 
 ## Tuning
 

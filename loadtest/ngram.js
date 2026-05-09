@@ -50,18 +50,37 @@ const DAY_MS        = 86400000;
 const rate429 = new Rate('rate_limited');
 
 export const options = {
-  stages: [
-    { duration: '30s', target: 10 },
-    { duration: '1m',  target: 50 },
-    { duration: '2m',  target: 100 },
-    { duration: '2m',  target: 200 },
-    { duration: '1m',  target: 0 },
-  ],
-  thresholds: {
-    http_req_failed:   ['rate<0.02'],
-    http_req_duration: ['p(95)<2000', 'p(99)<5000'],
-    rate_limited:      ['rate<0.001'],
+  // Skip the cold-start ramp — production has been online for a while.
+  // Start at 50 VUs and step up fast; thresholds with abortOnFail kill the
+  // run on the first sustained breach so we don't keep hammering past the knee.
+  scenarios: {
+    capacity: {
+      executor: 'ramping-vus',
+      startVUs: 50,
+      gracefulRampDown: '5s',
+      stages: [
+        { duration: '15s', target: 50 },   // brief settle
+        { duration: '30s', target: 150 },
+        { duration: '30s', target: 300 },
+        { duration: '30s', target: 600 },  // push past the warm-cache 200 ceiling
+        { duration: '10s', target: 0 },    // drain
+      ],
+    },
   },
+  thresholds: {
+    http_req_failed: [
+      { threshold: 'rate<0.05', abortOnFail: true, delayAbortEval: '15s' },
+    ],
+    http_req_duration: [
+      { threshold: 'p(95)<3000', abortOnFail: true, delayAbortEval: '15s' },
+    ],
+    rate_limited: [
+      { threshold: 'rate<0.001', abortOnFail: true },
+    ],
+  },
+  // Allow setup() to fire all 130 bypass-check requests concurrently.
+  batch: 130,
+  batchPerHost: 130,
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
@@ -94,12 +113,16 @@ export function setup() {
       'You will hit Caddy\'s 120/min rate limit and the run will fail setup.'
     );
   }
+  // Fire 130 health requests in parallel (bursts past the 120/min cap) — if
+  // none get 429, the bypass is on. Parallel takes ~1s vs ~30s sequential.
   console.log(`Verifying rate-limit bypass against ${BASE}/api/health ...`);
-  let limited = 0;
-  for (let i = 0; i < 130; i++) {
-    const res = http.get(`${BASE}/api/health`, { headers: DEFAULT_HEADERS });
-    if (res.status === 429) limited++;
-  }
+  const healthReqs = new Array(130).fill(null).map(() => ({
+    method: 'GET',
+    url: `${BASE}/api/health`,
+    params: { headers: DEFAULT_HEADERS },
+  }));
+  const responses = http.batch(healthReqs);
+  const limited = responses.filter((r) => r.status === 429).length;
   if (limited > 0) {
     throw new Error(
       `Rate-limit bypass NOT active: ${limited}/130 returned 429. ` +
@@ -141,5 +164,7 @@ export default function () {
     });
   }
 
-  sleep(randomIntBetween(2, 5));
+  // Shorter think time than a real user — we're optimizing for capacity
+  // signal per VU, not modeling browsing behavior precisely.
+  sleep(0.5 + Math.random());
 }
