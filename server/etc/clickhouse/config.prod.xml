@@ -14,15 +14,12 @@
     <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
 
     <!-- Concurrent query admission.
-         max_concurrent_queries: hard cap on simultaneous in-flight queries.
-           At 10 we saw 95k TOO_MANY_SIMULTANEOUS_QUERIES rejections under
-           load-test pressure; bumping to 30 is roughly the most this 3.7GB
-           box can support given ~250MB peak per cold-cache query.
-         queue_max_wait_ms: overflow queries wait for a slot up to this many
-           ms instead of failing immediately. Smooths bursts at the cost of
-           tail latency; 5s is well below the API's request budget. -->
+         At 10 we saw 95k TOO_MANY_SIMULTANEOUS_QUERIES rejections under
+         load-test pressure; bumping to 30 is roughly the most this 3.7GB
+         box can support given ~250MB peak per cold-cache query.
+         The companion queue_max_wait_ms setting is user-level and lives in
+         users.prod.xml. -->
     <max_concurrent_queries>30</max_concurrent_queries>
-    <queue_max_wait_ms>5000</queue_max_wait_ms>
 
     <!-- Disable system log tables that consume memory and disk -->
     <trace_log remove="1"/>

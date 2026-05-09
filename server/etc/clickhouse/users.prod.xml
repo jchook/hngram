@@ -2,7 +2,17 @@
 <clickhouse>
     <!-- Production user configuration (RFC-011)
          The hngram API user is created by init/002-users.sh on first startup.
-         This file only restricts the default user to localhost. -->
+         Restricts the default user to localhost and overrides profile
+         settings from users.xml (merged, not replaced). -->
+
+    <profiles>
+        <default>
+            <!-- Queue overflow queries up to 5s instead of failing fast with
+                 TOO_MANY_SIMULTANEOUS_QUERIES. Pairs with the bumped
+                 max_concurrent_queries=30 in config.prod.xml. -->
+            <queue_max_wait_ms>5000</queue_max_wait_ms>
+        </default>
+    </profiles>
 
     <users>
         <default>
