@@ -67,8 +67,8 @@ of silently testing Caddy's reject path.
 
 The script reads phrases from `loadtest/phrases.tsv` (gitignored — regenerate
 when you want a fresh sample). `fetch_phrases.sh` queries prod ClickHouse for
-the top phrases by recent activity, stratified ~1/3 each across unigrams,
-bigrams, and trigrams:
+the top phrases by recent activity, stratified evenly across n=1..5
+(`MAX_NGRAM_ORDER`):
 
 ```bash
 # On the prod host, from the repo root:

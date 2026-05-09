@@ -3,7 +3,8 @@
 #
 # Run this on the prod host, from the repo root (where docker-compose.prod.yml lives).
 # Writes loadtest/phrases.tsv with `count<TAB>phrase` lines, sorted by recent
-# count desc per n, stratified as ~1/3 unigrams, 1/3 bigrams, 1/3 trigrams.
+# count desc within each n. The corpus has n=1..5 (MAX_NGRAM_ORDER), so the
+# LIMIT argument is split evenly across all five strata.
 #
 # Usage:
 #   bash loadtest/fetch_phrases.sh           # 1000 phrases, last 90 days
@@ -13,12 +14,17 @@
 # The default ClickHouse user (no password) is restricted to loopback in
 # users.prod.xml, and clickhouse-client inside the container connects via
 # loopback — so no password is needed.
+#
+# Format is TSVRaw (no escape sequences). ngrams contain plain ASCII (the
+# tokenizer normalizes curly quotes to ' and strips control chars), so the
+# raw form is unambiguous and avoids `\'` / `\\` headaches in k6.
 
 set -euo pipefail
 
 LIMIT="${1:-1000}"
 DAYS="${2:-90}"
-PER_N=$(( LIMIT / 3 ))
+# 5 strata for n=1..5 — see MAX_NGRAM_ORDER in clickhouse crate.
+PER_N=$(( LIMIT / 5 ))
 
 cd "$(dirname "$0")/.."
 
@@ -34,9 +40,9 @@ WHERE bucket >= today() - INTERVAL ${DAYS} DAY
 GROUP BY n, ngram
 ORDER BY n ASC, recent_count DESC
 LIMIT ${PER_N} BY n
-FORMAT TSV"
+FORMAT TSVRaw"
 
-echo "Querying top ${PER_N} phrases per n (1,2,3) from last ${DAYS} days..."
+echo "Querying top ${PER_N} phrases per n (1..5) from last ${DAYS} days..."
 docker compose -f docker-compose.prod.yml exec -T clickhouse \
   clickhouse-client --query "$QUERY" \
   > loadtest/phrases.tsv
