@@ -17,6 +17,11 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
+    environment:
+      # Optional bypass for the rate limiter; see loadtest/README.md.
+      # Leave unset in normal operation — the Caddyfile has a sentinel default
+      # that no client would match.
+      - LOADTEST_TOKEN=${LOADTEST_TOKEN:-}
     depends_on:
       - api
     restart: unless-stopped

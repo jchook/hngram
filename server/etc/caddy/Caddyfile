@@ -5,11 +5,21 @@
 }
 
 :80 {
-    # Rate limit API: 120 requests/min per IP
+    # Rate limit API: 120 requests/min per IP.
+    # Bypassed for loopback and for requests carrying a valid loadtest token.
+    # Token is read from the LOADTEST_TOKEN env var; the default value below is
+    # a sentinel that no real client would send, so the bypass is closed unless
+    # the operator deliberately sets the env var. See loadtest/README.md.
     rate_limit {
         zone api_limit {
             match {
                 path /api/*
+                not {
+                    remote_ip 127.0.0.1/32 ::1/128
+                }
+                not {
+                    header X-Loadtest-Token {$LOADTEST_TOKEN:loadtest-disabled-do-not-use}
+                }
             }
             key {remote_host}
             events 120
