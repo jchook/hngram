@@ -27,3 +27,6 @@ Thumbs.db
 
 # Scratch
 tmp/
+
+# Loadtest artifacts (regenerated via fetch_phrases.sh)
+loadtest/phrases.tsv

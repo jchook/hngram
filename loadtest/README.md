@@ -63,6 +63,34 @@ The k6 `setup()` function fires 130 quick `/api/health` requests and aborts
 the run if any return `429`, so a misconfigured bypass fails loudly instead
 of silently testing Caddy's reject path.
 
+## Phrase pool
+
+The script reads phrases from `loadtest/phrases.tsv` (gitignored — regenerate
+when you want a fresh sample). `fetch_phrases.sh` queries prod ClickHouse for
+the top phrases by recent activity, stratified ~1/3 each across unigrams,
+bigrams, and trigrams:
+
+```bash
+# On the prod host, from the repo root:
+bash loadtest/fetch_phrases.sh             # 1000 phrases, last 90 days (default)
+bash loadtest/fetch_phrases.sh 10000       # 10k phrases
+bash loadtest/fetch_phrases.sh 1000 30     # 1000 phrases from the last 30 days
+```
+
+Each line of `phrases.tsv` is `count<TAB>phrase`. The k6 script uses only the
+phrase column and samples uniformly — combined with a per-request random
+date window (1mo–10y, placed randomly within 2011-01-01 to 2026-05-01), this
+produces enough URL variety to push past ClickHouse's mark/uncompressed caches
+and the OS page cache. That makes the test reflect mixed real-world load
+rather than warm-cache throughput.
+
+If you run k6 from your laptop (against `https://hngram.com`), `scp` the file
+down first:
+
+```bash
+scp prod:/srv/hngram/loadtest/phrases.tsv loadtest/phrases.tsv
+```
+
 ## Running
 
 ```bash
@@ -86,9 +114,10 @@ BASE_URL=http://localhost:8080 k6 run loadtest/ngram.js
 | High    | 2m       | 100 → 200 | Find the knee                          |
 | Drain   | 1m       | 200 → 0   | Watch recovery                         |
 
-Each VU loops: pick 1–5 phrases (50% hot / 35% medium / 15% cold) → fire them
-in parallel via `http.batch` → think 2–5s. Effective load at 200 VUs is
-roughly 100–200 RPS depending on response latency.
+Each VU loops: pick 1–5 phrases uniformly from `phrases.tsv`, each with its
+own random date range and granularity → fire them in parallel via
+`http.batch` → think 2–5s. Effective load at 200 VUs is roughly 100–200 RPS
+depending on response latency.
 
 ## Thresholds (cause k6 to exit nonzero)
 
@@ -109,8 +138,12 @@ Edit `options.stages` in `ngram.js`:
 - **Push higher**: extend the `200 → 300+` stage if 200 VUs barely budges p95.
 - **Soak**: replace the ramp with a flat hold at ~70% of the observed knee
   for 10–30 min to surface leaks, GC pauses, or ClickHouse merge issues.
-- **Cache-cold focus**: bias `pickPhrase()` toward `COLD` to stress
-  ClickHouse rather than the API's response cache.
+- **Realistic Zipf bias**: replace `randomItem(phrases)` with weighted
+  selection from the top of `phrases.tsv` (the file is sorted by recent
+  count desc within each n). Uniform sampling is more cache-hostile;
+  Zipf-weighted is closer to real traffic.
+- **Larger pool**: re-run `fetch_phrases.sh 10000` for a 10k phrase pool —
+  even more variety for finding cold-cache limits.
 
 ## Caveats
 
