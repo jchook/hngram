@@ -24,7 +24,8 @@ tower = { version = "0.5.3", features = ["limit"] }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+# "rc" feature enables Serialize for Arc<T>, used by the API response cache.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 
 # OpenAPI
@@ -33,6 +34,9 @@ utoipa-scalar = { version = "0.3", features = ["axum"] }
 
 # ClickHouse
 clickhouse = { version = "0.14", features = ["lz4", "time"] }
+
+# In-process LRU cache (API hot-path response cache)
+moka = { version = "0.12", features = ["future"] }
 
 # Logging
 tracing = "0.1"

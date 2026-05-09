@@ -11,9 +11,11 @@ pub use hn_clickhouse::{
     default_start_date, Granularity, HnClickHouse, MAX_NGRAM_ORDER, MAX_PHRASES,
     TOKENIZER_VERSION,
 };
+pub use moka::future::Cache;
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::json;
 pub use std::sync::Arc;
+pub use std::time::Duration;
 pub use time::macros::format_description;
 pub use time::Date;
 pub use tower::limit::ConcurrencyLimitLayer;
@@ -48,6 +50,32 @@ pub struct ApiDoc;
 
 pub struct AppState {
     pub clickhouse: HnClickHouse,
+    /// Hot-path response cache for /ngram. On hit, the response is served
+    /// without touching ClickHouse. TTL matches the Cache-Control header.
+    pub cache: NgramResponseCache,
+}
+
+/// Cache key for a fully-resolved /ngram request. Includes everything that
+/// changes the response so popular landing-page queries land on the same key.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct NgramCacheKey {
+    pub n: u8,
+    pub phrase: String,
+    pub start: Date,
+    pub end: Date,
+    pub granularity: Granularity,
+}
+
+pub type NgramResponseCache = Cache<NgramCacheKey, Arc<QueryResponse>>;
+
+/// Build a fresh response cache. ~500 entries with a 1h TTL — comfortably
+/// covers the landing-page query and a few hundred popular variants without
+/// blowing the API container's memory budget.
+pub fn build_response_cache() -> NgramResponseCache {
+    Cache::builder()
+        .max_capacity(500)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
 }
 
 // ============================================================================
@@ -416,6 +444,23 @@ pub async fn ngram(
         }
     };
 
+    // Hot-path cache lookup. Hit → skip ClickHouse entirely.
+    let cache_key = NgramCacheKey {
+        n,
+        phrase: normalized.clone(),
+        start,
+        end,
+        granularity,
+    };
+    if let Some(cached) = state.cache.get(&cache_key).await {
+        return (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "public, max-age=3600")],
+            Json(cached),
+        )
+            .into_response();
+    }
+
     // Query ClickHouse — server computes relative frequency
     let query_result = match granularity {
         Granularity::Day => state
@@ -479,33 +524,39 @@ pub async fn ngram(
                     _ => SeriesStatus::NotIndexed,
                 }
             };
+            let response = Arc::new(QueryResponse {
+                phrase: phrase.to_string(),
+                normalized,
+                status,
+                points: vec![],
+                global_count,
+                meta,
+            });
+            state.cache.insert(cache_key, response.clone()).await;
             (
                 StatusCode::OK,
                 [(header::CACHE_CONTROL, "public, max-age=3600")],
-                Json(QueryResponse {
-                    phrase: phrase.to_string(),
-                    normalized,
-                    status,
-                    points: vec![],
-                    global_count,
-                    meta,
-                }),
+                Json(response),
             )
                 .into_response()
         }
-        Ok(points) => (
-            StatusCode::OK,
-            [(header::CACHE_CONTROL, "public, max-age=3600")],
-            Json(QueryResponse {
+        Ok(points) => {
+            let response = Arc::new(QueryResponse {
                 phrase: phrase.to_string(),
                 normalized,
                 status: SeriesStatus::Indexed,
                 points,
                 global_count,
                 meta,
-            }),
-        )
-            .into_response(),
+            });
+            state.cache.insert(cache_key, response.clone()).await;
+            (
+                StatusCode::OK,
+                [(header::CACHE_CONTROL, "public, max-age=3600")],
+                Json(response),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::warn!("ClickHouse query failed for '{}': {}", phrase, e);
             (

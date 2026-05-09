@@ -1,6 +1,6 @@
 //! HN N-gram API server (RFC-005)
 
-use api::{api_router, AppState, HnClickHouse};
+use api::{api_router, build_response_cache, AppState, HnClickHouse};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -19,6 +19,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         clickhouse: HnClickHouse::from_env(),
+        cache: build_response_cache(),
     });
 
     let app = api_router(state);

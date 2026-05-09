@@ -723,7 +723,7 @@ impl HnClickHouse {
 // ============================================================================
 
 /// Time granularity for aggregated queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Granularity {
     Day,
     Week,
