@@ -54,6 +54,8 @@ The `process` (ClickHouse mode) and `import` commands ping ClickHouse immediatel
 
 The API accepts one phrase per request. The frontend makes parallel requests (one per phrase) for independent caching. Single-phrase requests are independently cacheable by CDN/browser, simpler to reason about, and the parallel requests are fast enough. See RFC-007-optimizations section 7.
 
+This property compounds with the API's in-process response cache (`moka` LRU keyed on `(n, normalized_phrase, start, end, granularity)`). With single-phrase requests, two users with overlapping phrase sets share cache entries — User A querying `["rust", "python"]` and User B querying `["rust", "go"]` both hit the same `rust` cache entry. A multi-phrase API would key on the *set*, so overlapping-but-different requests would miss each other's work and the effective hit rate would collapse.
+
 ---
 
 ## Watermark-based incremental ingest
