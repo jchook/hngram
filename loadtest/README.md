@@ -67,8 +67,9 @@ of silently testing Caddy's reject path.
 
 The script reads phrases from `loadtest/phrases.tsv` (gitignored — regenerate
 when you want a fresh sample). `fetch_phrases.sh` queries prod ClickHouse for
-the top phrases by recent activity, stratified evenly across n=1..5
-(`MAX_NGRAM_ORDER`):
+the top phrases by recent activity, with **per-n pool sizes that follow a 1/n
+(Zipf-style) distribution** — so the file itself reflects realistic query
+shape and k6 just samples uniformly:
 
 ```bash
 # On the prod host, from the repo root:
@@ -77,23 +78,23 @@ bash loadtest/fetch_phrases.sh 10000       # 10k phrases
 bash loadtest/fetch_phrases.sh 1000 30     # 1000 phrases from the last 30 days
 ```
 
-Each line of `phrases.tsv` is `count<TAB>n<TAB>phrase`. The k6 script groups
-phrases by n and samples with a Zipf-style 1/n weighting across orders:
+Each line of `phrases.tsv` is `count<TAB>n<TAB>phrase`. With `LIMIT=10000`
+the resulting pool sizes are roughly:
 
-| n      | Selection probability |
-|--------|----------------------:|
-| 1-gram | 44%                   |
-| 2-gram | 22%                   |
-| 3-gram | 15%                   |
-| 4-gram | 11%                   |
-| 5-gram |  9%                   |
+| n      | Pool size  | Share of pool |
+|--------|-----------:|--------------:|
+| 1-gram | 4380       | 44%           |
+| 2-gram | 2190       | 22%           |
+| 3-gram | 1460       | 15%           |
+| 4-gram | 1095       | 11%           |
+| 5-gram | 875        |  9%           |
 
-Within each n the script picks uniformly from the top-2000 phrases, so
-selection is implicitly biased toward popular phrases (popular phrases =
-top of each stratum). Combined with a per-request random date window
-(1mo–10y, placed randomly within 2011-01-01 to 2026-05-01), this produces
-enough URL variety to push past ClickHouse's mark/uncompressed caches and
-the OS page cache while still reflecting realistic user query patterns.
+Within each n stratum, phrases are sorted by recent count desc and the top
+N are kept — so selection is implicitly biased toward popular phrases.
+Combined with a per-request random date window (1mo–10y, placed randomly
+within 2011-01-01 to 2026-05-01), this produces enough URL variety to push
+past ClickHouse's mark/uncompressed caches and the OS page cache while
+still reflecting realistic user query patterns.
 
 If you run k6 from your laptop (against `https://hngram.com`), `scp` the file
 down first:

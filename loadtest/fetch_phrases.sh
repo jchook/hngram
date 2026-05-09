@@ -3,12 +3,15 @@
 #
 # Run this on the prod host, from the repo root (where docker-compose.prod.yml lives).
 # Writes loadtest/phrases.tsv with `count<TAB>n<TAB>phrase` lines, sorted by
-# recent count desc within each n. The corpus has n=1..5 (MAX_NGRAM_ORDER),
-# so the LIMIT argument is split evenly across all five strata.
+# recent count desc within each n.
 #
-# Even stratification keeps the file inspectable as "top phrases per n";
-# k6 reweights to a Zipf-style 1/n distribution at selection time so unigrams
-# get queried ~5x more than 5-grams (matches realistic user behavior).
+# Pool sizes per n follow a 1/n (Zipf-style) distribution so the file itself
+# matches realistic query distribution — unigrams ~5x more frequent than
+# 5-grams. k6 then samples uniformly from the whole pool with no extra
+# weighting.
+#
+# Weight ratios (×60 to keep them integers): 60, 30, 20, 15, 12 → sum 137.
+# So per-n counts ≈ LIMIT × {60,30,20,15,12} / 137.
 #
 # Usage:
 #   bash loadtest/fetch_phrases.sh           # 1000 phrases, last 90 days
@@ -27,8 +30,6 @@ set -euo pipefail
 
 LIMIT="${1:-1000}"
 DAYS="${2:-90}"
-# 5 strata for n=1..5 — see MAX_NGRAM_ORDER in clickhouse crate.
-PER_N=$(( LIMIT / 5 ))
 
 cd "$(dirname "$0")/.."
 
@@ -37,16 +38,31 @@ if [[ ! -f docker-compose.prod.yml ]]; then
   exit 1
 fi
 
-QUERY="SELECT sum(count) AS recent_count, n, ngram
-FROM hn_ngram.ngram_counts
-WHERE bucket >= today() - INTERVAL ${DAYS} DAY
-  AND tokenizer_version = '1'
-GROUP BY n, ngram
+# Compute Zipf-weighted per-n limits.
+N1=$(awk -v t="$LIMIT" 'BEGIN{printf "%.0f", t * 60 / 137}')
+N2=$(awk -v t="$LIMIT" 'BEGIN{printf "%.0f", t * 30 / 137}')
+N3=$(awk -v t="$LIMIT" 'BEGIN{printf "%.0f", t * 20 / 137}')
+N4=$(awk -v t="$LIMIT" 'BEGIN{printf "%.0f", t * 15 / 137}')
+N5=$(awk -v t="$LIMIT" 'BEGIN{printf "%.0f", t * 12 / 137}')
+
+QUERY="SELECT recent_count, n, ngram FROM (
+  SELECT
+    sum(count) AS recent_count, n, ngram,
+    row_number() OVER (PARTITION BY n ORDER BY sum(count) DESC) AS rn
+  FROM hn_ngram.ngram_counts
+  WHERE bucket >= today() - INTERVAL ${DAYS} DAY
+    AND tokenizer_version = '1'
+  GROUP BY n, ngram
+)
+WHERE (n = 1 AND rn <= ${N1})
+   OR (n = 2 AND rn <= ${N2})
+   OR (n = 3 AND rn <= ${N3})
+   OR (n = 4 AND rn <= ${N4})
+   OR (n = 5 AND rn <= ${N5})
 ORDER BY n ASC, recent_count DESC
-LIMIT ${PER_N} BY n
 FORMAT TSVRaw"
 
-echo "Querying top ${PER_N} phrases per n (1..5) from last ${DAYS} days..."
+echo "Querying Zipf-distributed pool: n=1:${N1}, 2:${N2}, 3:${N3}, 4:${N4}, 5:${N5} (last ${DAYS} days)..."
 docker compose -f docker-compose.prod.yml exec -T clickhouse \
   clickhouse-client --query "$QUERY" \
   > loadtest/phrases.tsv
