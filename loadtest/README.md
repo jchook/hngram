@@ -77,12 +77,23 @@ bash loadtest/fetch_phrases.sh 10000       # 10k phrases
 bash loadtest/fetch_phrases.sh 1000 30     # 1000 phrases from the last 30 days
 ```
 
-Each line of `phrases.tsv` is `count<TAB>phrase`. The k6 script uses only the
-phrase column and samples uniformly — combined with a per-request random
-date window (1mo–10y, placed randomly within 2011-01-01 to 2026-05-01), this
-produces enough URL variety to push past ClickHouse's mark/uncompressed caches
-and the OS page cache. That makes the test reflect mixed real-world load
-rather than warm-cache throughput.
+Each line of `phrases.tsv` is `count<TAB>n<TAB>phrase`. The k6 script groups
+phrases by n and samples with a Zipf-style 1/n weighting across orders:
+
+| n      | Selection probability |
+|--------|----------------------:|
+| 1-gram | 44%                   |
+| 2-gram | 22%                   |
+| 3-gram | 15%                   |
+| 4-gram | 11%                   |
+| 5-gram |  9%                   |
+
+Within each n the script picks uniformly from the top-2000 phrases, so
+selection is implicitly biased toward popular phrases (popular phrases =
+top of each stratum). Combined with a per-request random date window
+(1mo–10y, placed randomly within 2011-01-01 to 2026-05-01), this produces
+enough URL variety to push past ClickHouse's mark/uncompressed caches and
+the OS page cache while still reflecting realistic user query patterns.
 
 If you run k6 from your laptop (against `https://hngram.com`), `scp` the file
 down first:

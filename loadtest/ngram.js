@@ -30,14 +30,43 @@ const DEFAULT_HEADERS = TOKEN
   ? { 'X-Loadtest-Token': TOKEN, 'X-Loadtest': 'k6' }
   : { 'X-Loadtest': 'k6' };
 
-// Phrase pool — second column of phrases.tsv (count<TAB>phrase).
-// SharedArray loads once and is read-only across VUs.
-const phrases = new SharedArray('phrases', function () {
-  return open('./phrases.tsv')
+// Phrase pool — phrases.tsv columns are count<TAB>n<TAB>phrase, stratified
+// 2000 per n. SharedArray loads once and is read-only across VUs.
+//
+// Stored as 5 buckets indexed by n-1 (so phraseGroups[0] = unigrams,
+// phraseGroups[4] = 5-grams). k6's SharedArray flattens what the init
+// function returns, so wrap once.
+const phraseGroups = new SharedArray('phraseGroups', function () {
+  const groups = [[], [], [], [], []];
+  open('./phrases.tsv')
     .split('\n')
-    .map((line) => line.split('\t')[1])
-    .filter((p) => p && p.length > 0);
-});
+    .forEach((line) => {
+      if (!line) return;
+      const [, nStr, phrase] = line.split('\t');
+      const idx = parseInt(nStr, 10) - 1;
+      if (idx >= 0 && idx < 5 && phrase) groups[idx].push(phrase);
+    });
+  return [groups]; // wrap so SharedArray sees 1 element holding all groups
+})[0];
+
+// Zipf-style 1/n weighting across orders: unigrams ~5x more likely than
+// 5-grams. Cumulative thresholds let us map a single Math.random() to an n.
+const ZIPF_CUM_PROB = (() => {
+  const w = [1, 1 / 2, 1 / 3, 1 / 4, 1 / 5];
+  const sum = w.reduce((a, b) => a + b, 0);
+  let cum = 0;
+  return w.map((x) => (cum += x / sum));
+})();
+
+function pickPhrase() {
+  const r = Math.random();
+  let nIdx = 0;
+  for (; nIdx < ZIPF_CUM_PROB.length - 1; nIdx++) {
+    if (r < ZIPF_CUM_PROB[nIdx]) break;
+  }
+  const group = phraseGroups[nIdx];
+  return group[Math.floor(Math.random() * group.length)];
+}
 
 const GRANULARITIES = ['day', 'week', 'month', 'year'];
 
@@ -105,13 +134,17 @@ function randomDateRange() {
 }
 
 export function setup() {
-  if (phrases.length === 0) {
+  const totals = phraseGroups.map((g) => g.length);
+  const total = totals.reduce((a, b) => a + b, 0);
+  if (total === 0) {
     throw new Error(
       'Phrase pool is empty. Run `bash loadtest/fetch_phrases.sh` on the prod host first ' +
       'to populate loadtest/phrases.tsv.'
     );
   }
-  console.log(`Loaded ${phrases.length} phrases from phrases.tsv`);
+  console.log(
+    `Loaded ${total} phrases (n=1:${totals[0]}, 2:${totals[1]}, 3:${totals[2]}, 4:${totals[3]}, 5:${totals[4]})`
+  );
 
   if (!TOKEN && !BASE.includes('localhost') && !BASE.includes('127.0.0.1')) {
     console.warn(
@@ -144,7 +177,7 @@ export default function () {
 
   const reqs = [];
   for (let i = 0; i < phraseCount; i++) {
-    const phrase = randomItem(phrases);
+    const phrase = pickPhrase();
     const [start, end] = randomDateRange();
     const granularity = randomItem(GRANULARITIES);
     const url =

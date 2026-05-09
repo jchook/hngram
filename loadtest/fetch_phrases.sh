@@ -2,9 +2,13 @@
 # Fetch top phrases by recent activity from prod ClickHouse.
 #
 # Run this on the prod host, from the repo root (where docker-compose.prod.yml lives).
-# Writes loadtest/phrases.tsv with `count<TAB>phrase` lines, sorted by recent
-# count desc within each n. The corpus has n=1..5 (MAX_NGRAM_ORDER), so the
-# LIMIT argument is split evenly across all five strata.
+# Writes loadtest/phrases.tsv with `count<TAB>n<TAB>phrase` lines, sorted by
+# recent count desc within each n. The corpus has n=1..5 (MAX_NGRAM_ORDER),
+# so the LIMIT argument is split evenly across all five strata.
+#
+# Even stratification keeps the file inspectable as "top phrases per n";
+# k6 reweights to a Zipf-style 1/n distribution at selection time so unigrams
+# get queried ~5x more than 5-grams (matches realistic user behavior).
 #
 # Usage:
 #   bash loadtest/fetch_phrases.sh           # 1000 phrases, last 90 days
@@ -33,7 +37,7 @@ if [[ ! -f docker-compose.prod.yml ]]; then
   exit 1
 fi
 
-QUERY="SELECT sum(count) AS recent_count, ngram
+QUERY="SELECT sum(count) AS recent_count, n, ngram
 FROM hn_ngram.ngram_counts
 WHERE bucket >= today() - INTERVAL ${DAYS} DAY
   AND tokenizer_version = '1'
