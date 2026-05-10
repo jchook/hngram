@@ -146,7 +146,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         </Stack>
       </Collapse>
 
-      <Group justify="center" pt="md" pb="xs">
+      <Group justify="center" pb="xs">
         <Button
           type="submit"
           size="md"
