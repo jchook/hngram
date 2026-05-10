@@ -1,0 +1,7 @@
+{
+  "_comment": "Single source of truth for the frontend's default query state and the deploy smoke test's cache-warming list. Imported by client/src/features/query/useQueryState.ts and read by .github/workflows/deploy.yml. Update either dimension here only.",
+  "phrases": ["rust", "python"],
+  "start": "2011-01-01",
+  "granularity": "month",
+  "smoothing": 3
+}

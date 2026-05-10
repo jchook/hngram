@@ -123,6 +123,8 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
+      - uses: actions/checkout@v6
+
       - name: Smoke test + warm landing-page cache
         run: |
           set -e
@@ -136,11 +138,14 @@ jobs:
             "$BASE/api/health"
           echo "API healthy."
 
-          # Pre-warm the moka response cache for the two phrases the frontend
-          # loads by default. The first visitor after a deploy now lands on a
-          # warm cache instead of paying the 600ms CH cold-query cost.
+          # Pre-warm the moka response cache for the phrases the frontend
+          # loads by default. The phrase list lives in config/launch-defaults.json
+          # so the frontend (useQueryState.ts) and this workflow can never drift.
+          # The first visitor after a deploy lands on a warm cache instead of
+          # paying the 600ms CH cold-query cost.
           echo "Warming landing-page cache..."
-          for phrase in rust python; do
-            curl -fsS -o /dev/null "$BASE/api/ngram?phrase=$phrase"
+          jq -r '.phrases[]' config/launch-defaults.json | while read -r phrase; do
+            curl -fsS -o /dev/null "$BASE/api/ngram?phrase=$(jq -rn --arg p "$phrase" '$p|@uri')"
+            echo "  warmed: $phrase"
           done
           echo "Cache warmed."

@@ -6,11 +6,15 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import launchDefaults from '../../../../config/launch-defaults.json';
 
-const DEFAULT_START = '2011-01-01';
-const DEFAULT_GRANULARITY = 'month';
-const DEFAULT_SMOOTHING = 3;
-const DEFAULT_PHRASES = ['rust', 'python'];
+// Defaults are sourced from config/launch-defaults.json so the deploy
+// smoke test (.github/workflows/deploy.yml) and the frontend never drift
+// out of sync — the test pre-warms exactly what visitors land on.
+const DEFAULT_START = launchDefaults.start;
+const DEFAULT_GRANULARITY = launchDefaults.granularity;
+const DEFAULT_SMOOTHING = launchDefaults.smoothing;
+const DEFAULT_PHRASES = launchDefaults.phrases;
 
 export interface QueryState {
   phrases: string[];
