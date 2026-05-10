@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { Fragment, useState, useEffect } from 'react';
 import {
   Anchor,
   Button,
@@ -76,8 +76,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         className="phrases-input"
         label="Phrases"
         placeholder={phrases.length === 0 ? 'rust, go, python' : 'Add phrase'}
-        description="Press comma or Enter to add a phrase (max 10)"
-        size="md"
+        description="Press comma to add (max 10)"
         value={phrases}
         onChange={setPhrases}
         splitChars={[',']}
@@ -112,7 +111,14 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
                   size="xs"
                   onClick={() => applyComparison(compPhrases)}
                 >
-                  {compPhrases.join(' vs ')}
+                  {compPhrases.map((phrase, j) => (
+                    <Fragment key={j}>
+                      {j > 0 && (
+                        <span style={{ opacity: 0.4, padding: '0 0.4em' }}>•</span>
+                      )}
+                      {phrase}
+                    </Fragment>
+                  ))}
                 </Button>
               ))}
             </Group>
