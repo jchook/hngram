@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Button, Group, NumberInput, Stack, TextInput } from '@mantine/core';
-import { DateInput } from '@mantine/dates';
+import { MonthPickerInput } from '@mantine/dates';
 import dayjs from 'dayjs';
 import type { QueryState } from './useQueryState';
 
@@ -52,18 +52,18 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         onChange={e => setPhrases(e.currentTarget.value)}
       />
       <Group grow>
-        <DateInput
+        <MonthPickerInput
           label="Start"
           value={start}
           onChange={setStart}
-          valueFormat="YYYY-MM-DD"
+          valueFormat="MMM YYYY"
           maxDate={end || undefined}
         />
-        <DateInput
+        <MonthPickerInput
           label="End"
           value={end}
           onChange={setEnd}
-          valueFormat="YYYY-MM-DD"
+          valueFormat="MMM YYYY"
           minDate={start || undefined}
         />
         <NumberInput
