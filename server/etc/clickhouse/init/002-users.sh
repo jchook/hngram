@@ -14,8 +14,13 @@ HASH=$(tr -d '\n' < "$SECRET_FILE" | sha256sum | cut -d' ' -f1)
 
 clickhouse client -n <<-EOSQL
     CREATE USER IF NOT EXISTS hngram
-        IDENTIFIED WITH sha256_hash BY '${HASH}'
-        DEFAULT DATABASE hn_ngram
-        SETTINGS readonly = 1;
+        IDENTIFIED WITH sha256_hash BY '${HASH}';
+    ALTER USER hngram DEFAULT DATABASE hn_ngram;
+    -- Permissions are scoped per-table rather than via SETTINGS readonly:
+    -- readonly = 1 would block GRANT INSERT on the feedback table below
+    -- (readonly profiles override per-table grants in ClickHouse). The
+    -- explicit grants give the API exactly the writes it needs and nothing
+    -- more — SELECT everywhere, INSERT only into feedback.
     GRANT SELECT ON hn_ngram.* TO hngram;
+    GRANT INSERT ON hn_ngram.feedback TO hngram;
 EOSQL
