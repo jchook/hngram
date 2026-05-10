@@ -5,6 +5,7 @@
 import dayjs from 'dayjs';
 import type { Point } from '@/gen';
 import type { EChartsOption } from 'echarts';
+import { SERIES_COLORS } from './colors';
 
 // ============================================================================
 // Zero-fill
@@ -96,11 +97,6 @@ export interface ChartSeries {
   globalCount: number;
 }
 
-const COLORS = [
-  '#ff6600', '#1f77b4', '#2ca02c', '#9467bd', '#d62728',
-  '#17becf', '#8c564b', '#bcbd22', '#e377c2', '#7f7f7f',
-];
-
 /**
  * Build a complete ECharts option from transformed series data.
  */
@@ -149,7 +145,7 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
       { type: 'inside' },
       { type: 'slider' },
     ],
-    color: COLORS,
+    color: SERIES_COLORS,
     series: series.map((s) => ({
       name: s.label,
       type: 'line' as const,

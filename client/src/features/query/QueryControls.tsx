@@ -8,8 +8,8 @@ import {
   NumberInput,
   SegmentedControl,
   Stack,
+  TagsInput,
   Text,
-  TextInput,
   Tooltip,
 } from '@mantine/core';
 import type { QueryState, Since } from './useQueryState';
@@ -25,7 +25,7 @@ interface QueryControlsProps {
 
 export function QueryControls({ state, onSubmit }: QueryControlsProps) {
   // Local ephemeral state for inputs (committed on submit)
-  const [phrases, setPhrases] = useState(state.phrases.join(', '));
+  const [phrases, setPhrases] = useState<string[]>(state.phrases);
   const [since, setSince] = useState<Since>(state.since);
   const [smoothing, setSmoothing] = useState(state.smoothing);
   // More options are hidden by default — expand if the user has
@@ -36,29 +36,19 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
 
   // Sync from external state changes (e.g. popstate)
   useEffect(() => {
-    setPhrases(state.phrases.join(', '));
+    setPhrases(state.phrases);
     setSince(state.since);
     setSmoothing(state.smoothing);
   }, [state]);
 
   const handleSubmit = () => {
-    const parsed = phrases
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-      .slice(0, 10);
-
-    if (parsed.length === 0) return;
-
-    onSubmit({
-      phrases: parsed,
-      since,
-      smoothing,
-    });
+    const cleaned = phrases.map(s => s.trim()).filter(Boolean).slice(0, 10);
+    if (cleaned.length === 0) return;
+    onSubmit({ phrases: cleaned, since, smoothing });
   };
 
   const applyComparison = (compPhrases: string[]) => {
-    setPhrases(compPhrases.join(', '));
+    setPhrases(compPhrases);
     onSubmit({ phrases: compPhrases, since, smoothing });
   };
 
@@ -82,12 +72,17 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
   return (
     <form onSubmit={e => { e.preventDefault(); handleSubmit(); }}>
     <Stack gap="sm">
-      <TextInput
+      <TagsInput
+        className="phrases-input"
         label="Phrases"
-        placeholder="rust, go, python"
-        description="Comma-separated phrases (max 10)"
+        placeholder={phrases.length === 0 ? 'rust, go, python' : 'Add phrase'}
+        description="Press comma or Enter to add a phrase (max 10)"
+        size="md"
         value={phrases}
-        onChange={e => setPhrases(e.currentTarget.value)}
+        onChange={setPhrases}
+        splitChars={[',']}
+        maxTags={10}
+        clearable
       />
 
       <Anchor
@@ -146,7 +141,15 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
       </Collapse>
 
       <Group justify="center" pt="md" pb="xs">
-        <Button type="submit" size="md" px="xl" style={{ flex: 1, maxWidth: 360 }}>Show Trends</Button>
+        <Button
+          type="submit"
+          size="md"
+          px="xl"
+          variant="outline"
+          style={{ flex: 1, maxWidth: 360, borderWidth: 2 }}
+        >
+          Show Trends
+        </Button>
       </Group>
     </Stack>
     </form>

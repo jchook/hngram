@@ -74,3 +74,16 @@ html, body {
   margin-top: 4px;
   color: #b0b0b0;
 }
+
+/* Phrase pills inside the TagsInput. Per-pill background/text colors are
+ * generated from SERIES_COLORS in features/chart/colors.ts and injected at
+ * startup by main.tsx — keep this rule limited to non-color styling so the
+ * palette stays a single source of truth. */
+.phrases-input .mantine-Pill-root {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.phrases-input .mantine-Pill-root .mantine-CloseButton-root {
+  color: inherit;
+  opacity: 0.75;
+}

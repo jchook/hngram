@@ -84,7 +84,7 @@ export default function App() {
         <a href="/" className="hn-logo" aria-label="HN N-gram home">
           <img src="/y18.svg" alt="" width={18} height={18} />
         </a>
-        <a href="/" className="hn-name">HN N-gram</a>
+        <a href="/" className="hn-name">HN-gram</a>
         <span className="hn-tagline">
           Explore word and phrase trends in Hacker News comments over time
         </span>

@@ -8,12 +8,25 @@ import { ApiError } from './lib/client';
 import '@mantine/core/styles.css';
 import '@mantine/dates/styles.css';
 import './index.css';
+import { phrasePillPaletteCss } from './features/chart/colors';
+
+// Generate phrase-pill colors from the chart palette at startup so
+// SERIES_COLORS stays the single source of truth.
+const paletteStyle = document.createElement('style');
+paletteStyle.dataset.source = 'series-colors';
+paletteStyle.textContent = phrasePillPaletteCss();
+document.head.appendChild(paletteStyle);
 
 const theme = createTheme({
   fontFamily: 'Verdana, Geneva, sans-serif',
   fontFamilyMonospace: 'monospace',
   headings: { fontFamily: 'Verdana, Geneva, sans-serif' },
-  primaryColor: 'orange',
+  // Black-ink chrome to match news.ycombinator.com — drives input focus
+  // border, default button color, and all other "primary" accents. Orange
+  // is reserved for explicit brand bits (HN header, feedback "Yes" link)
+  // and for chart series (see features/chart/colors.ts).
+  primaryColor: 'dark',
+  defaultRadius: 0,
 });
 
 const queryClient = new QueryClient({
