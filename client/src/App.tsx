@@ -82,7 +82,7 @@ export default function App() {
     <>
       <header className="hn-header">
         <a href="/" className="hn-logo" aria-label="HN N-gram home">
-          <img src="/y18.svg" alt="" width={18} height={18} />
+          <img src="/n18.svg" alt="" width={18} height={18} />
         </a>
         <a href="/" className="hn-name">HN-gram</a>
         <span className="hn-tagline">
