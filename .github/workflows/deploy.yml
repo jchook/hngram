@@ -122,3 +122,25 @@ jobs:
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
+
+      - name: Smoke test + warm landing-page cache
+        run: |
+          set -e
+          BASE=https://hngram.com
+
+          # Wait for the API to be back online after recreate. --retry covers
+          # the container-restart window; if it can't reach the API after ~60s
+          # the deploy is broken and we want CI to fail loudly.
+          echo "Waiting for API health..."
+          curl -fsS -o /dev/null --retry 30 --retry-delay 2 --retry-all-errors \
+            "$BASE/api/health"
+          echo "API healthy."
+
+          # Pre-warm the moka response cache for the two phrases the frontend
+          # loads by default. The first visitor after a deploy now lands on a
+          # warm cache instead of paying the 600ms CH cold-query cost.
+          echo "Warming landing-page cache..."
+          for phrase in rust python; do
+            curl -fsS -o /dev/null "$BASE/api/ngram?phrase=$phrase"
+          done
+          echo "Cache warmed."

@@ -1,8 +1,11 @@
 import { Alert, Group, Loader, Text } from '@mantine/core';
 import type { QueryResponse } from '@/gen';
+import { ApiError } from '@/lib/client';
 
 interface QueryResult {
   isLoading: boolean;
+  isFetching?: boolean;
+  failureCount?: number;
   error: { message?: string } | null;
   data?: QueryResponse;
 }
@@ -19,17 +22,28 @@ export function QueryStatus({ phrases, results }: QueryStatusProps) {
     const result = results[i];
     if (!result) continue;
 
-    if (result.isLoading) {
+    const failureCount = result.failureCount ?? 0;
+    const isRetrying = failureCount > 0 && (result.isFetching ?? false);
+
+    if (result.isLoading || isRetrying) {
+      const label = isRetrying
+        ? `Retrying "${phrases[i]}" (server is busy, attempt ${failureCount + 1})...`
+        : `Loading "${phrases[i]}"...`;
       items.push(
         <Group key={phrases[i]} gap="xs">
           <Loader size="xs" />
-          <Text size="sm" c="dimmed">Loading "{phrases[i]}"...</Text>
+          <Text size="sm" c="dimmed">{label}</Text>
         </Group>
       );
     } else if (result.error) {
+      const isServerError =
+        result.error instanceof ApiError && result.error.status >= 500;
+      const message = isServerError
+        ? `"${phrases[i]}": the chart service is busy right now — please retry in a moment.`
+        : `Error querying "${phrases[i]}": ${result.error.message || 'Unknown error'}`;
       items.push(
-        <Alert key={phrases[i]} color="red" variant="light" py="xs">
-          Error querying "{phrases[i]}": {result.error.message || 'Unknown error'}
+        <Alert key={phrases[i]} color={isServerError ? 'yellow' : 'red'} variant="light" py="xs">
+          {message}
         </Alert>
       );
     } else if (result.data?.status === 'not_indexed') {
@@ -41,7 +55,7 @@ export function QueryStatus({ phrases, results }: QueryStatusProps) {
     } else if (result.data?.status === 'invalid') {
       items.push(
         <Alert key={phrases[i]} color="red" variant="light" py="xs">
-          "{phrases[i]}" is invalid (must be 1-3 words)
+          "{phrases[i]}" is invalid (must be 1-5 words)
         </Alert>
       );
     }

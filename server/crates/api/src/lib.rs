@@ -311,6 +311,27 @@ fn format_date(date: Date) -> String {
     date.to_string()
 }
 
+/// Snap a date down to the first of its month. Used for cache-key alignment:
+/// data is monthly-granular at typical query paths, so dates within the same
+/// month should share a cache entry.
+fn snap_to_month_start(d: Date) -> Date {
+    d.replace_day(1).expect("first of month is always valid")
+}
+
+/// Snap a date up to the last day of its month (inclusive). Pairs with
+/// `snap_to_month_start` so that a user-picked range like 2024-03-15 → 2024-05-09
+/// becomes 2024-03-01 → 2024-05-31 — fully covering all months touched by the
+/// range and collapsing intra-month variation onto one cache key.
+fn snap_to_month_end(d: Date) -> Date {
+    let first_of_next = if d.month() == time::Month::December {
+        Date::from_calendar_date(d.year() + 1, time::Month::January, 1)
+    } else {
+        Date::from_calendar_date(d.year(), d.month().next(), 1)
+    }
+    .expect("first of next month is always valid");
+    first_of_next - time::Duration::days(1)
+}
+
 fn ngram_order(tokens: &[String]) -> Option<u8> {
     let len = tokens.len();
     if len >= 1 && len <= MAX_NGRAM_ORDER as usize {
@@ -382,6 +403,15 @@ pub async fn ngram(
         None => time::OffsetDateTime::now_utc().date(),
     };
 
+    // Snap to month boundaries before validation. Two effects:
+    //   1. Cache cardinality drops dramatically — every date within the same
+    //      month maps to the same cache key, so e.g. 2024-03-15 and 2024-03-22
+    //      share a cached response.
+    //   2. UI date pickers can present month-only granularity without losing
+    //      precision (data is monthly-granular at typical aggregations anyway).
+    let start = snap_to_month_start(start);
+    let end = snap_to_month_end(end);
+
     if start > end {
         return (
             StatusCode::BAD_REQUEST,
@@ -444,7 +474,10 @@ pub async fn ngram(
         }
     };
 
-    // Hot-path cache lookup. Hit → skip ClickHouse entirely.
+    // Single-flight cache lookup: concurrent misses on the same key dedupe to
+    // one ClickHouse query. Prevents thundering-herd on TTL expiry — important
+    // under traffic spikes (HN front page) where many visitors hit the same
+    // popular phrases simultaneously.
     let cache_key = NgramCacheKey {
         n,
         phrase: normalized.clone(),
@@ -452,113 +485,99 @@ pub async fn ngram(
         end,
         granularity,
     };
-    if let Some(cached) = state.cache.get(&cache_key).await {
-        return (
-            StatusCode::OK,
-            [(header::CACHE_CONTROL, "public, max-age=3600")],
-            Json(cached),
-        )
-            .into_response();
-    }
 
-    // Query ClickHouse — server computes relative frequency
-    let query_result = match granularity {
-        Granularity::Day => state
-            .clickhouse
-            .query_ngrams(n, &[normalized.clone()], start, end)
-            .await
-            .map(|rows| {
-                rows.into_iter()
-                    .filter_map(|r| {
-                        if r.total_count > 0 && r.count > 0 {
-                            Some(Point {
-                                t: format_date(r.bucket),
-                                v: r.count as f64 / r.total_count as f64,
-                                count: r.count as u64,
-                                total: r.total_count,
+    let phrase_owned = phrase.to_string();
+    let normalized_owned = normalized;
+    let clickhouse = state.clickhouse.clone();
+
+    let result: Result<Arc<QueryResponse>, Arc<String>> = state
+        .cache
+        .try_get_with(cache_key, async move {
+            // Main timeseries query
+            let points_result: Result<Vec<Point>, _> = match granularity {
+                Granularity::Day => clickhouse
+                    .query_ngrams(n, &[normalized_owned.clone()], start, end)
+                    .await
+                    .map(|rows| {
+                        rows.into_iter()
+                            .filter_map(|r| {
+                                if r.total_count > 0 && r.count > 0 {
+                                    Some(Point {
+                                        t: format_date(r.bucket),
+                                        v: r.count as f64 / r.total_count as f64,
+                                        count: r.count as u64,
+                                        total: r.total_count,
+                                    })
+                                } else {
+                                    None
+                                }
                             })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<Point>>()
-            }),
-        _ => state
-            .clickhouse
-            .query_ngrams_aggregated(n, &[normalized.clone()], start, end, granularity)
-            .await
-            .map(|rows| {
-                rows.into_iter()
-                    .filter_map(|r| {
-                        if r.sum_total > 0 && r.sum_count > 0 {
-                            Some(Point {
-                                t: format_date(r.bucket),
-                                v: r.sum_count as f64 / r.sum_total as f64,
-                                count: r.sum_count,
-                                total: r.sum_total,
+                            .collect()
+                    }),
+                _ => clickhouse
+                    .query_ngrams_aggregated(
+                        n,
+                        &[normalized_owned.clone()],
+                        start,
+                        end,
+                        granularity,
+                    )
+                    .await
+                    .map(|rows| {
+                        rows.into_iter()
+                            .filter_map(|r| {
+                                if r.sum_total > 0 && r.sum_count > 0 {
+                                    Some(Point {
+                                        t: format_date(r.bucket),
+                                        v: r.sum_count as f64 / r.sum_total as f64,
+                                        count: r.sum_count,
+                                        total: r.sum_total,
+                                    })
+                                } else {
+                                    None
+                                }
                             })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<Point>>()
-            }),
-    };
+                            .collect()
+                    }),
+            };
 
-    // Fetch global count for this phrase
-    let global_count = state
-        .clickhouse
-        .get_global_count(n, &normalized)
-        .await
-        .unwrap_or(0);
+            let points = points_result.map_err(|e| format!("ClickHouse query failed: {}", e))?;
+            let global_count = clickhouse
+                .get_global_count(n, &normalized_owned)
+                .await
+                .unwrap_or(0);
 
-    match query_result {
-        Ok(points) if points.is_empty() => {
-            // Determine status: unigrams are always indexed (never pruned).
-            // For bigrams/trigrams, check the vocabulary table.
-            let status = if n == 1 {
+            // Indexing status: unigrams are never pruned; for higher-order
+            // ngrams, check the vocabulary table when the result was empty.
+            let status = if !points.is_empty() || n == 1 {
                 SeriesStatus::Indexed
             } else {
-                match state.clickhouse.is_in_vocabulary(n, &normalized).await {
+                match clickhouse.is_in_vocabulary(n, &normalized_owned).await {
                     Ok(true) => SeriesStatus::Indexed,
                     _ => SeriesStatus::NotIndexed,
                 }
             };
-            let response = Arc::new(QueryResponse {
-                phrase: phrase.to_string(),
-                normalized,
+
+            Ok::<Arc<QueryResponse>, String>(Arc::new(QueryResponse {
+                phrase: phrase_owned,
+                normalized: normalized_owned,
                 status,
-                points: vec![],
-                global_count,
-                meta,
-            });
-            state.cache.insert(cache_key, response.clone()).await;
-            (
-                StatusCode::OK,
-                [(header::CACHE_CONTROL, "public, max-age=3600")],
-                Json(response),
-            )
-                .into_response()
-        }
-        Ok(points) => {
-            let response = Arc::new(QueryResponse {
-                phrase: phrase.to_string(),
-                normalized,
-                status: SeriesStatus::Indexed,
                 points,
                 global_count,
                 meta,
-            });
-            state.cache.insert(cache_key, response.clone()).await;
-            (
-                StatusCode::OK,
-                [(header::CACHE_CONTROL, "public, max-age=3600")],
-                Json(response),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::warn!("ClickHouse query failed for '{}': {}", phrase, e);
+            }))
+        })
+        .await;
+
+    match result {
+        Ok(arc) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "public, max-age=3600")],
+            Json(arc),
+        )
+            .into_response(),
+        Err(err_arc) => {
+            tracing::warn!("ngram query failed for '{}': {}", phrase, err_arc);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("INTERNAL_ERROR", "Query failed")),
