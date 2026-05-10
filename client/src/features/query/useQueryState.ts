@@ -2,7 +2,7 @@
  * URL state management for the n-gram viewer.
  *
  * All query state lives in the URL via URLSearchParams.
- * Params: q (phrases), start, end, g (granularity), s (smoothing).
+ * Params: q (phrases), since (start year preset), g (granularity), s (smoothing).
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -11,21 +11,27 @@ import launchDefaults from '../../../../config/launch-defaults.json';
 // Defaults are sourced from config/launch-defaults.json so the deploy
 // smoke test (.github/workflows/deploy.yml) and the frontend never drift
 // out of sync — the test pre-warms exactly what visitors land on.
-const DEFAULT_START = launchDefaults.start;
 const DEFAULT_GRANULARITY = launchDefaults.granularity;
 const DEFAULT_SMOOTHING = launchDefaults.smoothing;
 const DEFAULT_PHRASES = launchDefaults.phrases;
+const DEFAULT_SINCE = launchDefaults.since as Since;
+
+// Two-value preset for the start year. 2011 is when HN really took off
+// (mainstream visibility, comment volume); 2006 is the dataset's beginning.
+// Constraining to two values collapses cache cardinality to 2 entries per
+// phrase per granularity instead of an unbounded month × month grid.
+export type Since = '2006' | '2011';
+export const SINCE_OPTIONS: Since[] = ['2006', '2011'];
+
+export function sinceToStart(since: Since): string {
+  return since === '2006' ? '2006-01-01' : '2011-01-01';
+}
 
 export interface QueryState {
   phrases: string[];
-  start: string;
-  end: string;
+  since: Since;
   granularity: string;
   smoothing: number;
-}
-
-function todayString(): string {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function parseFromUrl(): QueryState {
@@ -36,10 +42,12 @@ function parseFromUrl(): QueryState {
     ? q.split(',').map(s => s.trim()).filter(Boolean)
     : DEFAULT_PHRASES;
 
+  const sinceParam = params.get('since');
+  const since: Since = sinceParam === '2006' ? '2006' : DEFAULT_SINCE;
+
   return {
     phrases,
-    start: params.get('start') || DEFAULT_START,
-    end: params.get('end') || todayString(),
+    since,
     granularity: params.get('g') || DEFAULT_GRANULARITY,
     smoothing: parseInt(params.get('s') || '', 10) || DEFAULT_SMOOTHING,
   };
@@ -50,11 +58,8 @@ function serializeToUrl(state: QueryState): string {
   if (state.phrases.length > 0) {
     params.set('q', state.phrases.join(','));
   }
-  if (state.start && state.start !== DEFAULT_START) {
-    params.set('start', state.start);
-  }
-  if (state.end && state.end !== todayString()) {
-    params.set('end', state.end);
+  if (state.since !== DEFAULT_SINCE) {
+    params.set('since', state.since);
   }
   if (state.granularity && state.granularity !== DEFAULT_GRANULARITY) {
     params.set('g', state.granularity);

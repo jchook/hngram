@@ -3,7 +3,7 @@ import { Container, Paper, Stack, Text } from '@mantine/core';
 import { useQueries } from '@tanstack/react-query';
 import { ngramQueryOptions, useFreshness } from '@/gen';
 import type { NgramQueryResponse } from '@/gen';
-import { useQueryState } from '@/features/query/useQueryState';
+import { sinceToStart, useQueryState } from '@/features/query/useQueryState';
 import { QueryControls } from '@/features/query/QueryControls';
 import { TimeSeriesChart } from '@/features/chart/TimeSeriesChart';
 import { QueryStatus } from '@/components/QueryStatus';
@@ -20,13 +20,16 @@ export default function App() {
     query: { staleTime: 1000 * 60 * 60 },
   });
 
-  // One TanStack query per phrase, parallel
+  // One TanStack query per phrase, parallel.
+  // Date range collapses to a 2-value preset (since=2006|2011) — see
+  // useQueryState. End is omitted; the API defaults to today, snapped to
+  // the current month server-side, which keeps cache cardinality minimal.
+  const start = sinceToStart(state.since);
   const results = useQueries({
     queries: state.phrases.map(phrase =>
       ngramQueryOptions({
         phrase,
-        start: state.start,
-        end: state.end,
+        start,
         granularity: state.granularity,
       })
     ),

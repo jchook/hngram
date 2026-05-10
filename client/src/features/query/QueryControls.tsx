@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Button, Group, NumberInput, Stack, TextInput } from '@mantine/core';
-import { MonthPickerInput } from '@mantine/dates';
-import dayjs from 'dayjs';
-import type { QueryState } from './useQueryState';
+import { Button, Group, NumberInput, SegmentedControl, Stack, TextInput } from '@mantine/core';
+import type { QueryState, Since } from './useQueryState';
+import { SINCE_OPTIONS } from './useQueryState';
 
 interface QueryControlsProps {
   state: QueryState;
@@ -12,15 +11,13 @@ interface QueryControlsProps {
 export function QueryControls({ state, onSubmit }: QueryControlsProps) {
   // Local ephemeral state for inputs (committed on submit)
   const [phrases, setPhrases] = useState(state.phrases.join(', '));
-  const [start, setStart] = useState<Date | null>(dayjs(state.start).toDate());
-  const [end, setEnd] = useState<Date | null>(dayjs(state.end).toDate());
+  const [since, setSince] = useState<Since>(state.since);
   const [smoothing, setSmoothing] = useState(state.smoothing);
 
   // Sync from external state changes (e.g. popstate)
   useEffect(() => {
     setPhrases(state.phrases.join(', '));
-    setStart(dayjs(state.start).toDate());
-    setEnd(dayjs(state.end).toDate());
+    setSince(state.since);
     setSmoothing(state.smoothing);
   }, [state]);
 
@@ -35,8 +32,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
 
     onSubmit({
       phrases: parsed,
-      start: start ? dayjs(start).format('YYYY-MM-DD') : state.start,
-      end: end ? dayjs(end).format('YYYY-MM-DD') : state.end,
+      since,
       smoothing,
     });
   };
@@ -51,20 +47,12 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         value={phrases}
         onChange={e => setPhrases(e.currentTarget.value)}
       />
-      <Group grow>
-        <MonthPickerInput
-          label="Start"
-          value={start}
-          onChange={setStart}
-          valueFormat="MMM YYYY"
-          maxDate={end || undefined}
-        />
-        <MonthPickerInput
-          label="End"
-          value={end}
-          onChange={setEnd}
-          valueFormat="MMM YYYY"
-          minDate={start || undefined}
+      <Group grow align="end">
+        <SegmentedControl
+          value={since}
+          onChange={v => setSince(v as Since)}
+          data={SINCE_OPTIONS.map(s => ({ label: `Since ${s}`, value: s }))}
+          fullWidth
         />
         <NumberInput
           label="Smoothing"
