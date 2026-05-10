@@ -4,6 +4,11 @@ Explore word and phrase trends in Hacker News comments over time (like Google Ng
 
 See `docs/design-decisions.md` for architectural rationale behind key choices.
 
+## Working with this repo
+
+- **Never push to GitHub without explicit user permission.** Committing locally is fine when asked; `git push`, `git push --force`, opening/updating PRs, and any other action that affects `origin` requires the user to say so for that specific action. A prior approval to push does not authorize the next push.
+- Client-specific conventions live in `client/CLAUDE.md` — read it before editing anything under `client/`.
+
 ## Codebase Layout
 
 ```
