@@ -77,3 +77,20 @@ CREATE TABLE IF NOT EXISTS hn_ngram.ingest_log
 )
 ENGINE = MergeTree()
 ORDER BY id;
+
+-- Feedback table
+-- Anonymous user feedback on whether a multi-phrase comparison was interesting.
+-- Append-only; one row per thumbs-up. UUIDv7 keeps inserts time-sortable.
+CREATE TABLE IF NOT EXISTS hn_ngram.feedback
+(
+    id UUID DEFAULT generateUUIDv7(),
+    tokenizer_version LowCardinality(String),
+    phrases Array(String),
+    granularity LowCardinality(String),
+    start_date Date,
+    smoothing UInt8,
+    user_agent String,
+    created_at DateTime64(3, 'UTC') DEFAULT now64()
+)
+ENGINE = MergeTree()
+ORDER BY id;

@@ -8,11 +8,11 @@
 
 const API_BASE = '/api';
 
-export type RequestConfig = {
+export type RequestConfig<TData = unknown> = {
   method: string;
   url: string;
   params?: Record<string, unknown>;
-  data?: unknown;
+  data?: TData;
   signal?: AbortSignal;
   headers?: Record<string, string>;
 };
@@ -35,10 +35,10 @@ export class ApiError extends Error {
   }
 }
 
-async function client<TData, _TError = unknown, _TBody = unknown>(
-  config: RequestConfig
+async function client<TData, _TError = unknown, TBody = unknown>(
+  config: RequestConfig<TBody>
 ): Promise<{ data: TData }> {
-  const { method, url, params, signal, headers } = config;
+  const { method, url, params, data, signal, headers } = config;
 
   // Build URL with query params
   const fullUrl = new URL(`${API_BASE}${url}`, window.location.origin);
@@ -50,11 +50,15 @@ async function client<TData, _TError = unknown, _TBody = unknown>(
     }
   }
 
+  const hasBody = data !== undefined && data !== null;
+
   const response = await fetch(fullUrl.toString(), {
     method,
     signal,
+    body: hasBody ? JSON.stringify(data) : undefined,
     headers: {
       'Accept': 'application/json',
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       ...headers,
     },
   });
@@ -72,8 +76,8 @@ async function client<TData, _TError = unknown, _TBody = unknown>(
     throw new ApiError('UNKNOWN', `API error: ${response.status}`, response.status);
   }
 
-  const data = await response.json();
-  return { data };
+  const responseData: TData = await response.json();
+  return { data: responseData };
 }
 
 export default client;

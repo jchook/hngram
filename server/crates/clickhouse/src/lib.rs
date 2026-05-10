@@ -22,6 +22,7 @@ pub const TABLE_BUCKET_TOTALS: &str = "bucket_totals";
 pub const TABLE_NGRAM_VOCABULARY: &str = "ngram_vocabulary";
 pub const TABLE_GLOBAL_COUNTS: &str = "global_counts";
 pub const TABLE_INGEST_LOG: &str = "ingest_log";
+pub const TABLE_FEEDBACK: &str = "feedback";
 
 // ============================================================================
 // API Constants (RFC-005)
@@ -123,6 +124,19 @@ pub struct GlobalCountRow {
     pub n: u8,
     pub ngram: String,
     pub count: u64,
+}
+
+/// Row in `feedback` table.
+/// Omits `id` and `created_at` — ClickHouse provides defaults.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct FeedbackRow {
+    pub tokenizer_version: String,
+    pub phrases: Vec<String>,
+    pub granularity: String,
+    #[serde(with = "clickhouse::serde::time::date")]
+    pub start_date: Date,
+    pub smoothing: u8,
+    pub user_agent: String,
 }
 
 // ============================================================================
@@ -315,6 +329,14 @@ impl HnClickHouse {
     /// Insert a single ingest log entry
     pub async fn insert_ingest_log(&self, row: &IngestLogRow) -> Result<()> {
         let mut insert = self.client.insert::<IngestLogRow>(TABLE_INGEST_LOG).await?;
+        insert.write(row).await?;
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Insert a single feedback entry
+    pub async fn insert_feedback(&self, row: &FeedbackRow) -> Result<()> {
+        let mut insert = self.client.insert::<FeedbackRow>(TABLE_FEEDBACK).await?;
         insert.write(row).await?;
         insert.end().await?;
         Ok(())

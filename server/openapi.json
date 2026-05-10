@@ -9,6 +9,54 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/feedback": {
+      "post": {
+        "tags": [],
+        "operationId": "feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Feedback recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid feedback request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/freshness": {
       "get": {
         "tags": [],
@@ -158,6 +206,55 @@
           "error": {
             "code": "INVALID_DATE_FORMAT",
             "message": "Invalid start date '2020/01/01', expected YYYY-MM-DD"
+          }
+        }
+      },
+      "FeedbackRequest": {
+        "type": "object",
+        "description": "Anonymous user feedback that a multi-phrase comparison was interesting.\nOne row per thumbs-up; no rating field — submission itself is the signal.",
+        "required": [
+          "phrases",
+          "granularity",
+          "start",
+          "smoothing"
+        ],
+        "properties": {
+          "granularity": {
+            "type": "string",
+            "example": "month"
+          },
+          "phrases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Phrases the user was viewing when they hit thumbs-up (≥2 expected).",
+            "example": [
+              "rust",
+              "go"
+            ]
+          },
+          "smoothing": {
+            "type": "integer",
+            "format": "int32",
+            "example": 0,
+            "minimum": 0
+          },
+          "start": {
+            "type": "string",
+            "example": "2011-01-01"
+          }
+        }
+      },
+      "FeedbackResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "example": true
           }
         }
       },

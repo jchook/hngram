@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import launchDefaults from '../../../../config/launch-defaults.json';
+import suggested from '../../../../config/suggested-comparisons.json';
 
 // Defaults are sourced from config/launch-defaults.json so the deploy
 // smoke test (.github/workflows/deploy.yml) and the frontend never drift
@@ -15,6 +16,20 @@ const DEFAULT_GRANULARITY = launchDefaults.granularity;
 const DEFAULT_SMOOTHING = launchDefaults.smoothing;
 const DEFAULT_PHRASES = launchDefaults.phrases;
 const DEFAULT_SINCE = launchDefaults.since as Since;
+
+function phraseSetKey(phrases: string[]): string {
+  return phrases.map(p => p.trim().toLowerCase()).sort().join('|');
+}
+
+// Default + curated suggestions. We don't ask for feedback on these, since
+// the user didn't construct the comparison themselves.
+const SUGGESTED_PHRASE_KEYS = new Set<string>(
+  [DEFAULT_PHRASES, ...(suggested.comparisons as string[][])].map(phraseSetKey),
+);
+
+export function isSuggestedPhraseSet(phrases: string[]): boolean {
+  return SUGGESTED_PHRASE_KEYS.has(phraseSetKey(phrases));
+}
 
 // Two-value preset for the start year. 2011 is when HN really took off
 // (mainstream visibility, comment volume); 2006 is the dataset's beginning.

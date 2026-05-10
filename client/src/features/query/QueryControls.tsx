@@ -99,7 +99,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         onClick={() => setShowMore(v => !v)}
         style={{ alignSelf: 'flex-start' }}
       >
-        {showMore ? '▾ Hide' : '▸ Show'} extra filters
+        {showMore ? '▾ Show less' : '▸ Show more'}
       </Anchor>
 
       <Collapse in={showMore}>

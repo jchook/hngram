@@ -2,13 +2,13 @@
 
 pub use axum::{
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 pub use hn_clickhouse::{
-    default_start_date, Granularity, HnClickHouse, MAX_NGRAM_ORDER, MAX_PHRASES,
+    default_start_date, FeedbackRow, Granularity, HnClickHouse, MAX_NGRAM_ORDER, MAX_PHRASES,
     TOKENIZER_VERSION,
 };
 pub use moka::future::Cache;
@@ -29,7 +29,7 @@ pub use utoipa_scalar::{Scalar, Servable};
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, ngram, freshness),
+    paths(health, ngram, freshness, feedback),
     components(schemas(
         HealthResponse,
         FreshnessResponse,
@@ -38,6 +38,8 @@ pub use utoipa_scalar::{Scalar, Servable};
         QueryMeta,
         SeriesStatus,
         Point,
+        FeedbackRequest,
+        FeedbackResponse,
         ErrorResponse,
         ErrorDetail
     ))
@@ -87,6 +89,7 @@ pub fn api_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/freshness", get(freshness))
         .route("/ngram", get(ngram))
+        .route("/feedback", post(feedback))
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -585,4 +588,161 @@ pub async fn ngram(
                 .into_response()
         }
     }
+}
+
+// ============================================================================
+// Feedback Endpoint
+// ============================================================================
+
+/// Anonymous user feedback that a multi-phrase comparison was interesting.
+/// One row per thumbs-up; no rating field — submission itself is the signal.
+#[derive(Deserialize, ToSchema)]
+pub struct FeedbackRequest {
+    /// Phrases the user was viewing when they hit thumbs-up (≥2 expected).
+    #[schema(example = json!(["rust", "go"]))]
+    pub phrases: Vec<String>,
+    #[schema(example = "month")]
+    pub granularity: String,
+    #[schema(example = "2011-01-01")]
+    pub start: String,
+    #[schema(example = 0)]
+    pub smoothing: u8,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct FeedbackResponse {
+    #[schema(example = true)]
+    pub ok: bool,
+}
+
+const MAX_PHRASE_LEN: usize = 80;
+const MAX_USER_AGENT_LEN: usize = 256;
+const MAX_SMOOTHING: u8 = 24;
+
+#[utoipa::path(
+    post,
+    path = "/feedback",
+    request_body = FeedbackRequest,
+    responses(
+        (status = 200, description = "Feedback recorded", body = FeedbackResponse),
+        (status = 400, description = "Invalid feedback request", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse)
+    )
+)]
+pub async fn feedback(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<FeedbackRequest>,
+) -> impl IntoResponse {
+    let phrases: Vec<String> = req
+        .phrases
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if phrases.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "INVALID_PHRASES",
+                "At least 2 non-empty phrases are required",
+            )),
+        )
+            .into_response();
+    }
+    if phrases.len() > MAX_PHRASES {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "TOO_MANY_PHRASES",
+                format!("At most {} phrases allowed", MAX_PHRASES),
+            )),
+        )
+            .into_response();
+    }
+    if phrases.iter().any(|p| p.len() > MAX_PHRASE_LEN) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "PHRASE_TOO_LONG",
+                format!("Each phrase must be ≤ {} chars", MAX_PHRASE_LEN),
+            )),
+        )
+            .into_response();
+    }
+
+    let granularity = match Granularity::from_str(&req.granularity) {
+        Some(g) => g,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "INVALID_GRANULARITY",
+                    format!(
+                        "Invalid granularity '{}', expected day, week, month, or year",
+                        req.granularity
+                    ),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let start_date = match parse_date(&req.start) {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "INVALID_DATE_FORMAT",
+                    format!("Invalid start date '{}', expected YYYY-MM-DD", req.start),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    if req.smoothing > MAX_SMOOTHING {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "INVALID_SMOOTHING",
+                format!("smoothing must be ≤ {}", MAX_SMOOTHING),
+            )),
+        )
+            .into_response();
+    }
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            if s.len() > MAX_USER_AGENT_LEN {
+                s[..MAX_USER_AGENT_LEN].to_string()
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or_default();
+
+    let row = FeedbackRow {
+        tokenizer_version: TOKENIZER_VERSION.to_string(),
+        phrases,
+        granularity: format!("{:?}", granularity).to_lowercase(),
+        start_date,
+        smoothing: req.smoothing,
+        user_agent,
+    };
+
+    if let Err(e) = state.clickhouse.insert_feedback(&row).await {
+        tracing::warn!("feedback insert failed: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("INTERNAL_ERROR", "Failed to record feedback")),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, Json(FeedbackResponse { ok: true })).into_response()
 }

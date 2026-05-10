@@ -3,10 +3,11 @@ import { Container, Paper, Stack, Text } from '@mantine/core';
 import { useQueries } from '@tanstack/react-query';
 import { ngramQueryOptions, useFreshness } from '@/gen';
 import type { NgramQueryResponse } from '@/gen';
-import { sinceToStart, useQueryState } from '@/features/query/useQueryState';
+import { isSuggestedPhraseSet, sinceToStart, useQueryState } from '@/features/query/useQueryState';
 import { QueryControls } from '@/features/query/QueryControls';
 import { TimeSeriesChart } from '@/features/chart/TimeSeriesChart';
 import { QueryStatus } from '@/components/QueryStatus';
+import { FeedbackBanner } from '@/components/FeedbackBanner';
 import {
   fillMissingBuckets,
   applySmoothing,
@@ -92,6 +93,14 @@ export default function App() {
         <Stack gap="md">
         <Paper p="md" withBorder>
           <QueryControls state={state} onSubmit={setQuery} />
+          {state.phrases.length >= 2 && allDone && hasData && !isSuggestedPhraseSet(state.phrases) && (
+            <FeedbackBanner
+              phrases={state.phrases}
+              start={start}
+              granularity={state.granularity}
+              smoothing={state.smoothing}
+            />
+          )}
         </Paper>
 
         <QueryStatus phrases={state.phrases} results={results as never[]} />
