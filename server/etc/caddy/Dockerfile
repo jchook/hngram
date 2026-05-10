@@ -16,6 +16,10 @@ RUN bun install --frozen-lockfile
 # Copy client source
 COPY client/ ./
 
+# Copy shared config — useQueryState.ts and QueryControls.tsx import these
+# via ../../../../config/*.json (resolves to /config inside the image).
+COPY config /config
+
 # Copy OpenAPI spec for SDK generation (kubb config reads ../server/openapi.json)
 COPY server/openapi.json ../server/openapi.json
 
