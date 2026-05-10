@@ -97,7 +97,7 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
       </Anchor>
 
       <Collapse in={showMore}>
-        <Stack gap="sm">
+        <Stack gap="sm" pb="sm">
           <Input.Wrapper
             label="Try a comparison"
             description="Click to load a curated phrase set"
