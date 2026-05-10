@@ -1,0 +1,13 @@
+{
+  "_comment": "Curated phrase comparisons surfaced as click-to-apply pills under 'Extra filters' in the frontend (client/src/features/query/QueryControls.tsx). Each comparison should tell a clear visual story on the chart — winner-takes-all transitions, launch spikes, or rise-and-fall arcs.",
+  "comparisons": [
+    ["Atom", "VSCode"],
+    ["Mac OS X", "macOS"],
+    ["Cortana", "Copilot"],
+    ["jQuery", "React"],
+    ["MongoDB", "PostgreSQL"],
+    ["TensorFlow", "PyTorch"],
+    ["NFT", "ICO"],
+    ["Twitter", "Mastodon", "Bluesky"]
+  ]
+}

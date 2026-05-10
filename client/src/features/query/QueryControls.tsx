@@ -14,6 +14,9 @@ import {
 } from '@mantine/core';
 import type { QueryState, Since } from './useQueryState';
 import { SINCE_OPTIONS } from './useQueryState';
+import suggested from '../../../../config/suggested-comparisons.json';
+
+const SUGGESTED_COMPARISONS: string[][] = suggested.comparisons;
 
 interface QueryControlsProps {
   state: QueryState;
@@ -25,9 +28,9 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
   const [phrases, setPhrases] = useState(state.phrases.join(', '));
   const [since, setSince] = useState<Since>(state.since);
   const [smoothing, setSmoothing] = useState(state.smoothing);
-  // Advanced controls are hidden by default — expand if the user has
+  // More options are hidden by default — expand if the user has
   // diverged from defaults (e.g. arrived via a shared URL with ?since=2006).
-  const [showAdvanced, setShowAdvanced] = useState(
+  const [showMore, setShowMore] = useState(
     state.since !== '2011' || state.smoothing !== 3
   );
 
@@ -52,6 +55,11 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
       since,
       smoothing,
     });
+  };
+
+  const applyComparison = (compPhrases: string[]) => {
+    setPhrases(compPhrases.join(', '));
+    onSubmit({ phrases: compPhrases, since, smoothing });
   };
 
   const startYearLabel = (
@@ -88,32 +96,53 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
         size="sm"
         c="dimmed"
         underline="never"
-        onClick={() => setShowAdvanced(v => !v)}
+        onClick={() => setShowMore(v => !v)}
         style={{ alignSelf: 'flex-start' }}
       >
-        {showAdvanced ? '▴ Hide' : '▾ Show'} advanced options
+        {showMore ? '▾ Hide' : '▸ Show'} extra filters
       </Anchor>
 
-      <Collapse in={showAdvanced}>
-        <Group grow align="end">
-          <Input.Wrapper label={startYearLabel}>
-            <SegmentedControl
-              value={since}
-              onChange={v => setSince(v as Since)}
-              data={SINCE_OPTIONS.map(s => ({ label: `Since ${s}`, value: s }))}
-              fullWidth
-            />
+      <Collapse in={showMore}>
+        <Stack gap="sm">
+          <Input.Wrapper
+            label="Try a comparison"
+            description="Click to load a curated phrase set"
+          >
+            <Group gap="xs" mt={4}>
+              {SUGGESTED_COMPARISONS.map((compPhrases, i) => (
+                <Button
+                  key={i}
+                  type="button"
+                  variant="light"
+                  size="xs"
+                  onClick={() => applyComparison(compPhrases)}
+                >
+                  {compPhrases.join(' vs ')}
+                </Button>
+              ))}
+            </Group>
           </Input.Wrapper>
-          <NumberInput
-            label="Smoothing"
-            min={0}
-            max={12}
-            step={1}
-            value={smoothing}
-            onChange={v => setSmoothing(typeof v === 'number' ? v : parseInt(v, 10) || 0)}
-            clampBehavior="strict"
-          />
-        </Group>
+
+          <Group grow align="end">
+            <Input.Wrapper label={startYearLabel}>
+              <SegmentedControl
+                value={since}
+                onChange={v => setSince(v as Since)}
+                data={SINCE_OPTIONS.map(s => ({ label: `Since ${s}`, value: s }))}
+                fullWidth
+              />
+            </Input.Wrapper>
+            <NumberInput
+              label="Smoothing"
+              min={0}
+              max={12}
+              step={1}
+              value={smoothing}
+              onChange={v => setSmoothing(typeof v === 'number' ? v : parseInt(v, 10) || 0)}
+              clampBehavior="strict"
+            />
+          </Group>
+        </Stack>
       </Collapse>
 
       <Group justify="center" pt="md" pb="xs">
