@@ -12,7 +12,7 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import type { QueryState, Since } from './useQueryState';
+import type { QueryState, Since, YScale } from './useQueryState';
 import { SINCE_OPTIONS } from './useQueryState';
 import suggested from '../../../../config/suggested-comparisons.json';
 
@@ -28,10 +28,11 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
   const [phrases, setPhrases] = useState<string[]>(state.phrases);
   const [since, setSince] = useState<Since>(state.since);
   const [smoothing, setSmoothing] = useState(state.smoothing);
+  const [yScale, setYScale] = useState<YScale>(state.yScale);
   // More options are hidden by default — expand if the user has
   // diverged from defaults (e.g. arrived via a shared URL with ?since=2006).
   const [showMore, setShowMore] = useState(
-    state.since !== '2011' || state.smoothing !== 3
+    state.since !== '2011' || state.smoothing !== 3 || state.yScale !== 'linear'
   );
 
   // Sync from external state changes (e.g. popstate)
@@ -39,17 +40,18 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
     setPhrases(state.phrases);
     setSince(state.since);
     setSmoothing(state.smoothing);
+    setYScale(state.yScale);
   }, [state]);
 
   const handleSubmit = () => {
     const cleaned = phrases.map(s => s.trim()).filter(Boolean).slice(0, 10);
     if (cleaned.length === 0) return;
-    onSubmit({ phrases: cleaned, since, smoothing });
+    onSubmit({ phrases: cleaned, since, smoothing, yScale });
   };
 
   const applyComparison = (compPhrases: string[]) => {
     setPhrases(compPhrases);
-    onSubmit({ phrases: compPhrases, since, smoothing });
+    onSubmit({ phrases: compPhrases, since, smoothing, yScale });
   };
 
   const startYearLabel = (
@@ -143,6 +145,21 @@ export function QueryControls({ state, onSubmit }: QueryControlsProps) {
               clampBehavior="strict"
             />
           </Group>
+
+          <Input.Wrapper
+            label="Y axis"
+            description="Use log scale to compare phrases with very different popularity"
+          >
+            <SegmentedControl
+              value={yScale}
+              onChange={v => setYScale(v === 'log' ? 'log' : 'linear')}
+              data={[
+                { label: 'Linear', value: 'linear' },
+                { label: 'Log', value: 'log' },
+              ]}
+              mt={4}
+            />
+          </Input.Wrapper>
         </Stack>
       </Collapse>
 

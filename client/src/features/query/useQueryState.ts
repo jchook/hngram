@@ -2,7 +2,7 @@
  * URL state management for the n-gram viewer.
  *
  * All query state lives in the URL via URLSearchParams.
- * Params: q (phrases), since (start year preset), g (granularity), s (smoothing).
+ * Params: q (phrases), since (start year preset), g (granularity), s (smoothing), y (y-axis scale).
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -42,11 +42,16 @@ export function sinceToStart(since: Since): string {
   return since === '2006' ? '2006-01-01' : '2011-01-01';
 }
 
+export type YScale = 'linear' | 'log';
+export const Y_SCALE_OPTIONS: YScale[] = ['linear', 'log'];
+const DEFAULT_Y_SCALE: YScale = 'linear';
+
 export interface QueryState {
   phrases: string[];
   since: Since;
   granularity: string;
   smoothing: number;
+  yScale: YScale;
 }
 
 function parseFromUrl(): QueryState {
@@ -60,11 +65,15 @@ function parseFromUrl(): QueryState {
   const sinceParam = params.get('since');
   const since: Since = sinceParam === '2006' ? '2006' : DEFAULT_SINCE;
 
+  const yParam = params.get('y');
+  const yScale: YScale = yParam === 'log' ? 'log' : DEFAULT_Y_SCALE;
+
   return {
     phrases,
     since,
     granularity: params.get('g') || DEFAULT_GRANULARITY,
     smoothing: parseInt(params.get('s') || '', 10) || DEFAULT_SMOOTHING,
+    yScale,
   };
 }
 
@@ -81,6 +90,9 @@ function serializeToUrl(state: QueryState): string {
   }
   if (state.smoothing !== DEFAULT_SMOOTHING) {
     params.set('s', String(state.smoothing));
+  }
+  if (state.yScale !== DEFAULT_Y_SCALE) {
+    params.set('y', state.yScale);
   }
   const qs = params.toString();
   return qs ? `?${qs}` : window.location.pathname;

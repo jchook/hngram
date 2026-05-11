@@ -97,10 +97,25 @@ export interface ChartSeries {
   globalCount: number;
 }
 
+export type YScale = 'linear' | 'log';
+
 /**
  * Build a complete ECharts option from transformed series data.
+ *
+ * yScale="log" requires non-positive values to be replaced with null —
+ * ECharts can't render log(0), and a null becomes a gap in the line.
  */
-export function buildChartOption(series: ChartSeries[]): EChartsOption {
+export function buildChartOption(
+  series: ChartSeries[],
+  yScale: YScale = 'linear',
+): EChartsOption {
+  const isLog = yScale === 'log';
+  const axisLabel = {
+    formatter: (value: number) => formatFrequency(value),
+  };
+  const yAxis: EChartsOption['yAxis'] = isLog
+    ? { type: 'log', axisLabel }
+    : { type: 'value', axisLabel };
   return {
     tooltip: {
       trigger: 'axis',
@@ -108,7 +123,7 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
         const items = params as Array<{
           seriesName: string;
           color: string;
-          data: [string, number, number, number];
+          data: [string, number | null, number, number];
         }>;
         if (!items?.length) return '';
         const date = items[0].data[0];
@@ -135,12 +150,7 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
     xAxis: {
       type: 'time',
     },
-    yAxis: {
-      type: 'value',
-      axisLabel: {
-        formatter: (value: number) => formatFrequency(value),
-      },
-    },
+    yAxis,
     dataZoom: [
       { type: 'inside' },
       { type: 'slider' },
@@ -150,7 +160,12 @@ export function buildChartOption(series: ChartSeries[]): EChartsOption {
       name: s.label,
       type: 'line' as const,
       showSymbol: false,
-      data: s.points.map(p => [p.t, p.v, p.count, p.total]),
+      data: s.points.map(p => [
+        p.t,
+        isLog && p.v <= 0 ? null : p.v,
+        p.count,
+        p.total,
+      ]),
     })),
   };
 }
@@ -161,7 +176,8 @@ function formatCount(n: number): string {
   return n.toString();
 }
 
-function formatFrequency(v: number): string {
+function formatFrequency(v: number | null): string {
+  if (v === null) return '—';
   if (v === 0) return '0';
   if (v < 0.0001) return v.toExponential(2);
   if (v < 0.01) return v.toFixed(5);

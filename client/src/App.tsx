@@ -71,8 +71,8 @@ export default function App() {
   }, [results, state.phrases, state.smoothing, state.granularity]);
 
   const chartOption = useMemo(
-    () => buildChartOption(chartSeries),
-    [chartSeries],
+    () => buildChartOption(chartSeries, state.yScale),
+    [chartSeries, state.yScale],
   );
 
   const hasData = chartSeries.length > 0;
